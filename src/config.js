@@ -21,6 +21,9 @@ export function ensureOutDir(dir) {
   return out;
 }
 
+/** False until setup has run (or was skipped) in this project. */
+export const configExists = (dir) => fs.existsSync(file(dir));
+
 export function loadConfig(dir) {
   let user = {};
   try {

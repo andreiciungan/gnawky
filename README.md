@@ -34,7 +34,13 @@ cd ~/code/my-app
 gnawky
 ```
 
-You get an interactive menu (arrow keys + Enter, or number keys; `q`/Esc goes back):
+The first time you start Gnawky in a project, a short setup runs:
+
+1. **Your project:** detects the stack (TypeScript, Express, React, Next.js, Docker, GitHub Actions, databases, auth libraries), checks for a lockfile and git, and warns if a `.env` file is not ignored by git. It only reads `package.json` and file names.
+2. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to.
+3. **First scan:** saves semgrep rules that match the stack (for example `p/expressjs`, `p/react`, `p/dockerfile`) and offers to run the first scan.
+
+You can run the setup again from Settings. After that you get an interactive menu (arrow keys + Enter, or number keys; `q`/Esc goes back):
 
 ```
 gnawky  my-app  /Users/you/code/my-app
@@ -53,11 +59,12 @@ What would you like to do?
 ```
 
 - **Review & fix**: go through findings one by one and choose fix, skip, or ignore. Nothing happens until you confirm the final plan.
+- **Verified fixes**: before applying dependency fixes, you can have Gnawky run your `test`, `build`, `lint` and `typecheck` scripts before and after the change (all at once, or one package at a time with automatic undo of any upgrade that breaks them). It also checks `npm ls` for broken dependency trees, warns about packages that don't support your Node version, and compares npm audit before and after. Then you keep the branch, undo everything, or ask Claude to investigate a failure.
 - **Browse findings**: open any finding for details and act on just that one.
 - **Ask Claude for help**: starts Claude Code with the scan results, after a privacy notice (needs Claude Code; disabled in offline mode).
 - **Ignored findings**: see every ignore decision with its reason, and restore any of them.
 - **Settings**: minimum severity, offline mode, scanners on/off, semgrep rules. Saved per project in `.gnawky/config.json`.
-- **Check installed tools**: shows which scanners are missing and how to install them.
+- **Check installed tools**: shows which scanners are missing and installs them (Homebrew/pipx) if you want.
 
 Headless mode for CI and scripts:
 
@@ -74,7 +81,8 @@ Requires Node 18+ and a `package-lock.json`.
 
 - **The scan is read-only.** Nothing changes unless you choose a fix in the app and confirm the plan.
 - **Fixes happen on a new git branch**, and only if your working tree is clean, so you can review with `git diff` and throw everything away in one command.
-- **No install scripts run during fixes** (`--ignore-scripts`), and `npm audit fix --force` is never used. Semver-major upgrades are labeled as breaking and need their own approval.
+- **No install scripts run during fixes** (`--ignore-scripts`), and `npm audit fix --force` is never used. Semver-major upgrades are labeled as breaking and need their own approval. `npm rebuild` is only offered when a check fails, with its own warning.
+- **Your project's code only runs if you say so.** Verifying a fix runs your package.json scripts, which is opt-in every time and shows the exact commands. It never happens in headless or `--ci` mode.
 - **Secrets are never written to reports.** gitleaks runs with `--redact`, and code snippets are excluded.
 - **No shell.** External tools are launched with argument arrays, so file names or package data can't inject commands. Package specs are validated before `npm install`.
 - **Offline mode** (Settings, or `--offline`): npm audit is skipped (it sends your dependency list to the npm registry), semgrep only uses local rule files, and "Ask Claude" is disabled. Outside offline mode your source code is still never uploaded: only the dependency list goes to the registry, and semgrep downloads its rulesets with metrics turned off.

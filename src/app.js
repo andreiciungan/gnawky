@@ -1,8 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { c, clear, ask, confirm, pause, select, sevTag } from './ui.js';
-import { loadConfig, saveConfig, ensureOutDir, OUT_DIR, DEFAULT_CONFIG } from './config.js';
+import { c, clear, ask, confirm, pause, select, sevTag, printLogo } from './ui.js';
+import {
+  loadConfig, saveConfig, configExists, ensureOutDir, OUT_DIR, DEFAULT_CONFIG,
+} from './config.js';
+import { detectProject, semgrepRulesFor } from './detect.js';
+import { TOOLS, tool, toolVersion, installCommand, installTool } from './tools.js';
 import {
   performScan, loadLastScan, writeReports, reportFile, filterFindings, visibleFindings,
 } from './scan.js';
@@ -11,7 +15,7 @@ import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
   planSteps, regressions, undoFix,
 } from './fix.js';
-import { run, isAvailable, IS_WIN, scanNpmAudit } from './scanners.js';
+import { isAvailable, IS_WIN, scanNpmAudit } from './scanners.js';
 import {
   detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
 } from './verify.js';
@@ -39,10 +43,15 @@ function summary(findings) {
     .join(', ');
 }
 
-function header(s) {
+function header(s, { logo = false } = {}) {
   clear();
   const name = s.pkg?.name ?? path.basename(s.dir);
-  console.log(`${c.bold(c.cyan('Gnawky'))}  ${c.bold(name)}  ${c.gray(s.dir)}`);
+  if (logo) {
+    printLogo();
+    console.log(`${c.bold(name)}  ${c.gray(s.dir)}`);
+  } else {
+    console.log(`${c.bold(c.cyan('Gnawky'))}  ${c.bold(name)}  ${c.gray(s.dir)}`);
+  }
   const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
   if (s.cfg.offline) bits.push(c.yellow('offline mode'));
   if (s.stale && s.result) bits.push(c.yellow('results may be out of date, rescan'));
@@ -524,6 +533,7 @@ async function settingsScreen(s) {
       { label: `Scanner gitleaks: ${onoff(s.cfg.scanners.gitleaks)}`, value: 'gitleaks' },
       { label: `Scanner semgrep: ${onoff(s.cfg.scanners.semgrep)}`, value: 'semgrep' },
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
+      { label: 'Run setup again (detect stack, install tools)', value: 'setup' },
       { label: 'Reset to defaults', value: 'reset' },
       { label: 'Back', value: null },
     ]);
@@ -538,6 +548,9 @@ async function settingsScreen(s) {
       console.log(c.gray('In offline mode only local files are used.'));
       const v = await ask('Comma-separated list (empty = keep current): ');
       if (v) s.cfg.semgrepConfigs = v.split(',').map((x) => x.trim()).filter(Boolean);
+    } else if (pick === 'setup') {
+      await setupScreen(s);
+      continue;
     } else if (pick === 'reset') {
       if (!(await confirm('Reset all settings?'))) continue;
       s.cfg = structuredClone(DEFAULT_CONFIG);
@@ -549,31 +562,165 @@ async function settingsScreen(s) {
   }
 }
 
-const TOOLS = [
-  { cmd: 'npm', why: 'checks dependencies', hint: 'comes with Node.js' },
-  { cmd: 'git', why: 'safe fix branches', hint: 'https://git-scm.com' },
-  { cmd: 'gitleaks', why: 'finds leaked secrets', hint: 'brew install gitleaks   (or https://github.com/gitleaks/gitleaks)' },
-  { cmd: 'semgrep', why: 'finds risky code', hint: 'brew install semgrep   or   pipx install semgrep' },
-  { cmd: 'claude', why: 'optional: Ask Claude', hint: 'npm install -g @anthropic-ai/claude-code' },
-];
+// ------------------------------------------------------------------ setup
+
+const STEPS = 3;
+const stepTitle = (n, title) => console.log(`${c.gray(`Step ${n} of ${STEPS}`)}  ${c.bold(title)}\n`);
+const listOr = (xs, none = c.gray('none detected')) => (xs.length ? xs.join(', ') : none);
+
+function printProject(p) {
+  const row = (k, v) => console.log(`  ${c.gray(k.padEnd(12))}${v}`);
+  row('Project', p.hasPackageJson ? `${c.bold(p.name)} ${c.gray(`(${p.depCount} dependencies)`)}` : c.yellow('no package.json'));
+  row('Language', p.typescript ? 'TypeScript' : 'JavaScript');
+  row('Frameworks', listOr(p.frameworks));
+  if (p.databases.length) row('Databases', p.databases.join(', '));
+  if (p.auth.length) row('Auth', p.auth.join(', '));
+  const extras = [p.docker && 'Docker', p.workflows && `GitHub Actions (${p.workflows} workflow${p.workflows > 1 ? 's' : ''})`].filter(Boolean);
+  if (extras.length) row('Also', extras.join(', '));
+  row('Lockfile', p.lockfile === 'npm' ? `${c.green('✔')} package-lock.json`
+    : p.lockfile ? c.yellow(`⚠ ${p.lockfile} lockfile: not supported yet, npm audit needs package-lock.json`)
+      : c.yellow('⚠ none: npm audit needs one (npm install --package-lock-only --ignore-scripts)'));
+  row('Git', p.git ? `${c.green('✔')} repository` : c.yellow('⚠ not a git repository: automatic fixes need one (git init)'));
+  for (const e of p.envFiles) {
+    row('Secrets', e.ignored === false
+      ? c.red(`✖ ${e.file} is NOT ignored by git: it could be committed with your secrets`)
+      : `${c.green('✔')} ${e.file} ${c.gray(e.ignored ? 'is ignored by git' : 'found')}`);
+  }
+  console.log();
+}
+
+function recommendTools(p) {
+  const envNote = p.envFiles.length ? ` You have ${p.envFiles.map((e) => e.file).join(', ')}.` : '';
+  const stack = [p.typescript ? 'TypeScript' : 'JavaScript', ...p.frameworks].join(' / ');
+  return [
+    { t: tool('npm'), level: 'required', reason: `Checks your ${p.depCount} dependencies for known vulnerabilities.` },
+    { t: tool('git'), level: 'recommended', reason: 'Lets Gnawky make fixes on a separate branch you can throw away.' },
+    { t: tool('gitleaks'), level: 'recommended', reason: `Finds API keys, passwords and tokens in your files and git history.${envNote}` },
+    { t: tool('semgrep'), level: 'recommended', reason: `Finds risky code (injection, XSS, unsafe eval) with rules for ${stack}.` },
+    { t: tool('claude'), level: 'optional', reason: 'Explains findings in plain language and proposes fixes ("Ask Claude").' },
+  ];
+}
+
+/** Offers to install one missing tool. Returns true if it is installed afterwards. */
+async function offerInstall(t) {
+  const cmd = installCommand(t);
+  if (!cmd) {
+    console.log(`    ${c.gray('install it yourself:')} ${t.hint}`);
+    return false;
+  }
+  const choice = await select(`Install ${t.cmd}?`, [
+    { label: `Install now  ${c.gray(`(${cmd[0]} ${cmd[1].join(' ')})`)}`, value: 'install' },
+    { label: 'Skip', value: 'skip' },
+  ]);
+  if (choice !== 'install') return false;
+  console.log(c.gray(`\n$ ${cmd[0]} ${cmd[1].join(' ')}`));
+  const ok = installTool(t);
+  console.log(ok
+    ? c.green(`\n✔ ${t.cmd} installed: ${toolVersion(t.cmd)}\n`)
+    : c.red(`\n✖ ${t.cmd} is still not available. If the install succeeded, open a new terminal and start Gnawky again.\n`));
+  return ok;
+}
+
+/** First-run setup: detect the stack, recommend and install tools, pick semgrep rules, first scan. */
+async function setupScreen(s, { firstRun = false } = {}) {
+  header(s, { logo: true });
+  console.log(c.bold(firstRun ? 'Welcome to Gnawky!' : 'Setup') + '\n');
+  console.log(`Let's set Gnawky up for ${c.bold(s.pkg?.name ?? path.basename(s.dir))}. It takes about a minute:\n`);
+  console.log(`  1. Look at your project to see which technologies it uses`);
+  console.log(c.gray('     (reads package.json and file names only; nothing leaves this computer)'));
+  console.log('  2. Recommend the scanners that fit it, and install the ones you want');
+  console.log('  3. Run your first security scan');
+  console.log(c.gray('\n  Scanning is read-only: nothing in your project changes unless you approve a fix.\n'));
+  const start = await select('Ready?', [
+    { label: 'Start setup', value: 'start' },
+    { label: 'Skip setup (you can run it later from Settings)', value: 'skip' },
+  ]);
+  if (start === null) return; // back: ask again next time
+  if (start === 'skip') {
+    saveConfig(s.dir, s.cfg);
+    return;
+  }
+
+  // Step 1: the project
+  header(s, { logo: true });
+  stepTitle(1, 'Your project');
+  const p = detectProject(s.dir);
+  printProject(p);
+  await pause();
+
+  // Step 2: tools
+  header(s, { logo: true });
+  stepTitle(2, 'Recommended tools');
+  const recs = recommendTools(p).map((r) => ({ ...r, version: toolVersion(r.t.cmd) }));
+  for (const { t, level, reason, version } of recs) {
+    const icon = version ? c.green('✔') : level === 'optional' ? c.gray('–') : c.red('✖');
+    const tag = level === 'optional' ? c.gray('optional') : level === 'required' ? c.gray('required') : c.cyan('recommended');
+    console.log(`  ${icon} ${c.bold(t.cmd.padEnd(9))} ${version ? c.gray(version) : c.yellow('not installed')}  ${tag}`);
+    console.log(`      ${c.gray(reason)}`);
+  }
+  console.log();
+  const missing = recs.filter((r) => !r.version && r.level !== 'required');
+  if (!missing.length) {
+    console.log(c.green('All set: every tool is installed.\n'));
+    await pause();
+  } else {
+    if (process.platform === 'darwin' && !isAvailable('brew')) {
+      console.log(c.gray('Tip: with Homebrew (https://brew.sh) Gnawky can install these for you.\n'));
+    }
+    for (const { t } of missing) {
+      console.log(`${c.bold(t.cmd)}: ${c.gray(t.why)}`);
+      await offerInstall(t);
+      console.log();
+    }
+    await pause();
+  }
+
+  // Step 3: rules and first scan
+  s.cfg.semgrepConfigs = semgrepRulesFor(p);
+  saveConfig(s.dir, s.cfg);
+  header(s, { logo: true });
+  stepTitle(3, 'First scan');
+  console.log(`Settings saved in ${c.bold(`${OUT_DIR}/config.json`)} ${c.gray('(the folder is ignored by git)')}:`);
+  console.log(`  ${c.gray('Semgrep rules'.padEnd(15))}${s.cfg.semgrepConfigs.join(', ')}`);
+  console.log(`  ${c.gray('Min. severity'.padEnd(15))}${s.cfg.minSeverity}`);
+  console.log(c.gray('  You can change these any time in Settings.\n'));
+  const scan = await select('Run your first scan now?', [
+    { label: 'Scan now', value: true },
+    { label: 'Later, go to the menu', value: false },
+  ]);
+  if (scan) await scanScreen(s);
+}
 
 async function doctorScreen(s) {
-  header(s);
-  console.log(c.bold('Installed tools\n'));
-  console.log(`  ${c.green('✔')} ${'node'.padEnd(9)} ${process.version}`);
-  for (const t of TOOLS) {
-    const r = run(t.cmd, ['--version'], { timeoutMs: 15000 });
-    if (!r.error && r.status === 0) {
-      const version = r.stdout.trim().split('\n')[0].slice(0, 40);
-      console.log(`  ${c.green('✔')} ${t.cmd.padEnd(9)} ${version}  ${c.gray(t.why)}`);
-    } else {
-      console.log(`  ${c.red('✖')} ${t.cmd.padEnd(9)} ${c.gray(t.why)}`);
-      console.log(`    ${c.gray('install:')} ${t.hint}`);
+  for (;;) {
+    header(s);
+    console.log(c.bold('Installed tools\n'));
+    console.log(`  ${c.green('✔')} ${'node'.padEnd(9)} ${process.version}`);
+    const missing = [];
+    for (const t of TOOLS) {
+      const version = toolVersion(t.cmd);
+      if (version) {
+        console.log(`  ${c.green('✔')} ${t.cmd.padEnd(9)} ${version}  ${c.gray(t.why)}`);
+      } else {
+        missing.push(t);
+        console.log(`  ${c.red('✖')} ${t.cmd.padEnd(9)} ${c.gray(t.why)}`);
+        console.log(`    ${c.gray('install:')} ${installCommand(t) ? installCommand(t).flat().join(' ') : t.hint}`);
+      }
     }
+    const lock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(s.dir, f)));
+    if (!lock) console.log(c.yellow('\n  ⚠ No package-lock.json: npm audit needs one (npm install --package-lock-only --ignore-scripts).'));
+    console.log();
+    const installable = missing.filter((t) => installCommand(t));
+    const pick = await select('Install a missing tool?', [
+      ...installable.map((t) => ({ label: `Install ${t.cmd}  ${c.gray(`(${installCommand(t).flat().join(' ')})`)}`, value: t })),
+      { label: 'Back', value: null },
+    ]);
+    if (!pick) return;
+    console.log(c.gray(`\n$ ${installCommand(pick).flat().join(' ')}`));
+    const ok = installTool(pick);
+    console.log(ok ? c.green(`\n✔ ${pick.cmd} installed.`) : c.red(`\n✖ ${pick.cmd} is still not available.`));
+    await pause();
   }
-  const lock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(s.dir, f)));
-  if (!lock) console.log(c.yellow('\n  ⚠ No package-lock.json: npm audit needs one (npm install --package-lock-only --ignore-scripts).'));
-  await pause();
 }
 
 const SCREENS = {
@@ -592,8 +739,9 @@ export async function startApp(dir) {
       console.log('Gnawky is meant to be started inside the Node.js project you want to scan.\n');
       if (!(await confirm('Continue anyway?'))) return;
     }
+    if (!configExists(dir)) await setupScreen(s, { firstRun: true });
     for (;;) {
-      header(s);
+      header(s, { logo: true });
       const n = s.result?.findings.length ?? 0;
       const ignored = safeIgnores(dir).length;
       const choice = await select('What would you like to do?', [
