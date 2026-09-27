@@ -14,7 +14,7 @@ const SHELL_SHIMS = new Set(['npm', 'claude']);
  * Exception: on Windows, npm and claude are .cmd shims that Node can only start
  * via a shell; callers must only pass constant or validated args to them.
  */
-export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000 } = {}) {
+export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000, env = {} } = {}) {
   const viaShell = IS_WIN && SHELL_SHIMS.has(cmd);
   const res = spawnSync(viaShell ? `${cmd}.cmd` : cmd, args, {
     cwd,
@@ -22,7 +22,7 @@ export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000 } = {}) {
     shell: viaShell,
     timeout: timeoutMs,
     maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env, NO_COLOR: '1' },
+    env: { ...process.env, NO_COLOR: '1', ...env },
   });
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '', error: res.error };
 }
@@ -36,16 +36,40 @@ export function isAvailable(cmd) {
 
 const NPM_SEVERITY = { critical: 'critical', high: 'high', moderate: 'medium', low: 'low', info: 'info' };
 
-function npmFix(fixAvailable) {
-  if (fixAvailable === true || (fixAvailable && !fixAvailable.isSemVerMajor)) {
+const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
+
+function directDeps(dir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    return Object.assign({}, ...DEP_FIELDS.map((k) => pkg[k] ?? {}));
+  } catch {
+    return {};
+  }
+}
+
+function npmFix(fixAvailable, direct) {
+  if (fixAvailable === true) {
     return { type: 'npm-audit-fix', detail: 'Non-breaking update available (npm audit fix).' };
   }
-  if (fixAvailable && fixAvailable.isSemVerMajor) {
+  // npm names the package to install. Plain `npm audit fix` skips it when the new
+  // version is outside the range in package.json (e.g. an exact pin), so the
+  // upgrade is installed explicitly instead. Only for direct dependencies:
+  // installing anything else would add it to package.json.
+  if (fixAvailable && direct[fixAvailable.name]) {
+    const major = Boolean(fixAvailable.isSemVerMajor);
     return {
-      type: 'npm-major-upgrade',
+      type: major ? 'npm-major-upgrade' : 'npm-upgrade',
       package: fixAvailable.name,
       version: fixAvailable.version,
-      detail: `Upgrade ${fixAvailable.name} to ${fixAvailable.version}. This is a semver-major change and may break your code; run your tests.`,
+      detail: major
+        ? `Upgrade ${fixAvailable.name} to ${fixAvailable.version}. This is a semver-major change and may break your code; run your tests.`
+        : `Upgrade ${fixAvailable.name} to ${fixAvailable.version} (same major version).`,
+    };
+  }
+  if (fixAvailable) {
+    return {
+      type: 'manual',
+      detail: `Fixed by updating ${fixAvailable.name} to ${fixAvailable.version}, which is not listed in package.json. Update the package that depends on it, or add an "overrides" entry.`,
     };
   }
   return {
@@ -67,6 +91,7 @@ export function scanNpmAudit(dir) {
   }
   if (data.error) return { error: data.error.summary ?? 'npm audit failed' };
 
+  const direct = directDeps(dir);
   const findings = [];
   for (const [pkg, v] of Object.entries(data.vulnerabilities ?? {})) {
     // Entries whose "via" only lists other package names are transitive:
@@ -84,7 +109,7 @@ export function scanNpmAudit(dir) {
           description: `Vulnerable versions: ${adv.range ?? 'unknown'}. Installed at: ${(v.nodes ?? []).slice(0, 3).join(', ') || 'n/a'}.`,
           cwe: adv.cwe ?? [],
           url: adv.url ?? null,
-          fix: npmFix(v.fixAvailable),
+          fix: npmFix(v.fixAvailable, direct),
         }),
       );
     }

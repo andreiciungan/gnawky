@@ -3,12 +3,18 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { c, clear, ask, confirm, pause, select, sevTag } from './ui.js';
 import { loadConfig, saveConfig, ensureOutDir, OUT_DIR, DEFAULT_CONFIG } from './config.js';
-import { performScan, loadLastScan, writeReports, reportFile } from './scan.js';
+import {
+  performScan, loadLastScan, writeReports, reportFile, filterFindings, visibleFindings,
+} from './scan.js';
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
+  planSteps, regressions, undoFix,
 } from './fix.js';
-import { run, isAvailable, IS_WIN } from './scanners.js';
+import { run, isAvailable, IS_WIN, scanNpmAudit } from './scanners.js';
+import {
+  detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
+} from './verify.js';
 
 // ------------------------------------------------------------------ helpers
 
@@ -173,23 +179,218 @@ async function confirmAndApply(s, plan) {
   header(s);
   console.log(c.bold('Here is what will happen:\n'));
   for (const line of describePlan(plan)) console.log(`  • ${line}`);
-  if (hasDependencyChanges(plan)) {
-    const problem = preflight(s.dir);
+  const deps = hasDependencyChanges(plan);
+  const problem = deps ? preflight(s.dir) : null;
+  if (deps) {
     console.log(problem
       ? c.yellow(`\n  ⚠ Dependency fixes will be skipped: ${problem}`)
       : c.gray('\n  Dependency changes are made on a new git branch, with install scripts disabled.'));
   }
   console.log();
+  let opts = { scripts: [], oneAtATime: false };
+  if (deps && !problem) {
+    opts = await chooseVerification(s, plan);
+    if (!opts) return;
+  }
   if (!(await confirm('Apply this plan?'))) {
     console.log('Cancelled. Nothing was changed.');
     await pause();
     return;
   }
   console.log();
-  const { branch } = applyPlan(s.dir, plan, (m) => console.log(m));
+  const report = applyPlan(s.dir, plan, (m) => console.log(m), opts);
   if (plan.ignores.length) dropFromResult(s, plan.ignores.map((i) => i.finding.fingerprint));
-  if (branch) s.stale = true;
+  if (report.branch) return verifyScreen(s, report);
   await pause();
+}
+
+/** Asks which package.json scripts should verify the fix. Returns null if the user backs out. */
+async function chooseVerification(s, plan) {
+  const available = detectScripts(s.dir);
+  if (!available.length) {
+    console.log(c.yellow('  ⚠ No test, build, lint or typecheck script in package.json.'));
+    console.log(c.gray('    Gnawky will check dependency compatibility, but can\'t check that your project still runs.\n'));
+    return { scripts: [], oneAtATime: false };
+  }
+  const cmds = (names) => names.map((n) => `npm run ${n}`).join(', ');
+  console.log(c.bold('Check that your project still works?'));
+  console.log(c.gray('  Gnawky can run your package.json scripts before and after the fix, so it can tell'));
+  console.log(c.gray('  whether the fix broke something or it was already failing.'));
+  console.log(`  ${c.yellow('This runs your project\'s own code')} ${c.gray('(tests may start servers or use the network).')}`);
+  console.log(c.gray('  Each script gets 15 minutes. Install scripts stay disabled.\n'));
+  const choices = [{ label: `Yes, run: ${cmds(available)}`, value: available }];
+  if (available.includes('test') && available.length > 1) choices.push({ label: 'Only: npm run test', value: ['test'] });
+  choices.push({ label: 'No, only check dependency compatibility', value: [] });
+  const scripts = await select('Verify the fix?', choices);
+  if (scripts === null) return null;
+
+  let oneAtATime = false;
+  if (scripts.length && planSteps(plan).length > 1) {
+    console.log();
+    const mode = await select('How should the fixes be applied?', [
+      { label: 'All at once, then run the scripts (faster)', value: 'all' },
+      { label: 'One package at a time: run the scripts after each, undo any change that breaks them (slower)', value: 'one' },
+    ]);
+    if (mode === null) return null;
+    oneAtATime = mode === 'one';
+  }
+  console.log();
+  return { scripts, oneAtATime };
+}
+
+function printVerifyReport(report, audit) {
+  const ok = (m) => console.log(`  ${c.green('✔')} ${m}`);
+  const warn = (m) => console.log(`  ${c.yellow('⚠')} ${m}`);
+  const bad = (m) => console.log(`  ${c.red('✖')} ${m}`);
+  const sub = (m) => console.log(`      ${c.gray(m)}`);
+
+  console.log(`${c.bold('Fix results')}  ${c.gray(`on branch ${report.branch}`)}\n`);
+  console.log(c.bold('Changes'));
+  for (const st of report.steps) {
+    const label = `${st.label}${st.major ? c.yellow('  (major)') : ''}`;
+    if (st.status === 'applied') ok(`${label}  ${c.gray(`${st.findings} finding(s)`)}`);
+    else if (st.status === 'reverted') warn(`${label}  ${c.yellow(`undone: it broke ${st.broke.map((n) => `npm run ${n}`).join(', ')}`)}`);
+    else bad(`${label}  ${c.red('npm failed, not applied')}`);
+  }
+
+  console.log(`\n${c.bold('Compatibility')}`);
+  if (report.lsNew.length) {
+    bad(`${report.lsNew.length} new dependency problem(s) found by npm ls:`);
+    for (const p of report.lsNew.slice(0, 8)) sub(p);
+  } else {
+    ok(`No new dependency problems (npm ls)${report.lsPreexisting ? c.gray(`  ·  ${report.lsPreexisting} that already existed`) : ''}`);
+  }
+  if (report.engines.length) {
+    warn(`Packages that say they don't support your Node ${process.version}:`);
+    for (const e of report.engines.slice(0, 8)) sub(e);
+  } else {
+    ok(`Installed packages support your Node ${process.version}`);
+  }
+
+  if (audit) {
+    console.log(`\n${c.bold('npm audit')}`);
+    const line = `fixed ${audit.fixed.length}  ·  still open ${audit.remaining.length}`;
+    if (audit.added.length) {
+      warn(`${line}  ·  ${c.yellow(`new ${audit.added.length}`)}`);
+      for (const f of audit.added.slice(0, 5)) console.log(`      ${sevTag(f.severity)} ${f.title}`);
+      sub('New ones usually come from the upgraded packages\' own dependencies. Rescan and review them.');
+    } else {
+      ok(line);
+    }
+  }
+
+  console.log(`\n${c.bold('Your scripts')}`);
+  if (report.scriptsSkipped) {
+    warn(`Not run: ${report.scriptsSkipped}`);
+  } else if (!report.scripts.length) {
+    warn('Not run, so this fix is not verified. Run your app and tests before you commit.');
+  } else {
+    for (const n of report.scripts) {
+      const before = report.baseline[n];
+      const after = report.after[n];
+      if (report.oneAtATime) {
+        if (before.ok) ok(`npm run ${n}  ${c.gray('passed before, and after every change that was kept')}`);
+        else warn(`npm run ${n}  ${c.gray('was already failing before the fix, so it could not judge the changes')}`);
+      } else if (before.ok && after.ok) ok(`npm run ${n}  ${c.gray('passed before and after')}`);
+      else if (before.ok) bad(`npm run ${n}  ${c.red(`passed before, ${after.timedOut ? 'TIMES OUT' : 'FAILS'} after the fix`)}`);
+      else if (after.ok) ok(`npm run ${n}  ${c.gray('failed before, passes now')}`);
+      else warn(`npm run ${n}  ${c.gray('failed before and after (not caused by the fix)')}`);
+    }
+  }
+
+  const broken = regressions(report);
+  console.log();
+  if (broken.length) console.log(c.bold(c.red(`✖ The fix broke: ${broken.map((n) => `npm run ${n}`).join(', ')}`)));
+  else if (report.scripts.length && !report.lsNew.length) console.log(c.bold(c.green('✔ Everything that worked before still works.')));
+  console.log();
+}
+
+/** After a dependency fix: show the checks, then keep, undo, or dig into failures. */
+async function verifyScreen(s, report) {
+  let audit = null;
+  let auditAll = null;
+  if (!s.cfg.offline && s.cfg.scanners['npm-audit'] !== false) {
+    console.log(c.gray('\nRunning npm audit again…'));
+    const res = scanNpmAudit(s.dir);
+    if (res.findings) {
+      auditAll = filterFindings(s.dir, s.cfg, res.findings);
+      audit = diffFindings(s.result.findings.filter((f) => f.tool === 'npm-audit'), auditAll);
+    }
+  }
+
+  for (;;) {
+    header(s);
+    printVerifyReport(report, audit);
+    const broken = regressions(report);
+    const failed = report.scripts.filter((n) => report.after[n] && !report.after[n].ok);
+    const native = broken.length ? packagesWithInstallScripts(s.dir) : [];
+    const choice = await select('What now?', [
+      { label: 'Keep the changes on this branch', value: 'keep' },
+      { label: `Undo everything (back to ${report.base}, delete the branch)`, value: 'undo' },
+      ...(failed.length ? [{ label: 'Show the output of the failed scripts', value: 'output' }] : []),
+      ...(broken.length && native.length
+        ? [{ label: `Run npm rebuild, then retry (runs install scripts of ${native.length} package(s))`, value: 'rebuild' }] : []),
+      ...(broken.length ? [{ label: 'Ask Claude to investigate the failure', value: 'claude', disabled: s.cfg.offline }] : []),
+    ]);
+
+    if (choice === 'undo') {
+      if (!(await confirm(`Throw away all changes on ${report.branch}?`))) continue;
+      console.log();
+      undoFix(s.dir, report, (m) => console.log(m));
+      s.stale = false;
+      await pause();
+      return;
+    }
+    if (choice === 'output') {
+      header(s);
+      for (const n of failed) {
+        console.log(c.bold(`npm run ${n}`) + c.gray(`  (last lines; full log: ${path.relative(s.dir, report.after[n].logFile)})`));
+        console.log(report.after[n].tail + '\n');
+      }
+      await pause();
+      continue;
+    }
+    if (choice === 'rebuild') {
+      console.log(c.yellow('\nnpm rebuild runs the install scripts of every installed package (for example native builds).'));
+      console.log(c.gray(`Packages with install scripts: ${native.slice(0, 10).join(', ')}${native.length > 10 ? ', …' : ''}`));
+      if (!(await confirm('Only continue if you trust your dependencies. Run npm rebuild?'))) continue;
+      console.log(c.gray('\n  running npm rebuild…'));
+      const r = rebuild(s.dir);
+      if (r.status !== 0) console.log(c.red(`  ✖ npm rebuild failed:\n${r.stderr.trim().split('\n').slice(-8).join('\n')}`));
+      for (const n of broken) {
+        console.log(c.gray(`  running npm run ${n}…`));
+        report.after[n] = runScript(s.dir, n, 'after-rebuild');
+        console.log(`    ${describeResult(report.after[n])}`);
+      }
+      await pause();
+      continue;
+    }
+    if (choice === 'claude') {
+      await launchClaude(s, buildVerifyPrompt(s, report, broken));
+      continue;
+    }
+
+    // Keep (also when the user just backs out).
+    if (auditAll) {
+      const others = s.result.findings.filter((f) => f.tool !== 'npm-audit');
+      s.result.findings = visibleFindings([...others, ...auditAll], s.cfg);
+      const tool = s.result.tools.find((t) => t.name === 'npm-audit');
+      if (tool) tool.count = auditAll.length;
+      writeReports(s.dir, s.result);
+    } else {
+      s.stale = true;
+    }
+    header(s);
+    console.log(`${c.bold('Kept on branch')} ${report.branch}\n`);
+    if (report.diffStat) console.log(`${report.diffStat}\n`);
+    console.log('Next steps:');
+    console.log('  1. Review the changes:  git diff');
+    console.log('  2. If a package needs a build step:  npm rebuild');
+    console.log('  3. Commit on this branch:  git add package.json package-lock.json && git commit -m "Fix vulnerable dependencies"');
+    console.log(c.gray(`  To throw it all away:  git checkout -- package.json package-lock.json && git checkout ${report.base} && git branch -D ${report.branch}`));
+    await pause();
+    return;
+  }
 }
 
 function buildClaudePrompt(s, f) {
@@ -213,7 +414,35 @@ Rules. Follow them strictly:
 `;
 }
 
+function buildVerifyPrompt(s, report, broken) {
+  const logs = broken.map((n) => `- \`npm run ${n}\`: \`${path.relative(s.dir, report.after[n].logFile)}\``).join('\n');
+  const changes = report.steps.filter((st) => st.status === 'applied').map((st) => `- ${st.label}`).join('\n');
+  return `# Investigate a failing dependency upgrade (started by Gnawky)
+
+Gnawky upgraded dependencies to fix security vulnerabilities, on the git branch \`${report.branch}\` (started from \`${report.base}\`). These scripts passed before the upgrade and fail after it.
+
+Full output of each failing script:
+${logs}
+
+Changes made (see \`git diff package.json\`):
+${changes}
+
+Find out why it fails: read the logs, identify which upgraded package causes it and what changed in it, and find the code in this project that is affected. Then give 1 to 3 ways to fix it with trade-offs (for example: adapt the code, pick a different version, or undo just that upgrade) and say which one you recommend. Then ask me what I want to do.
+
+Rules. Follow them strictly:
+- Do not open .env files, private keys (*.pem, *.key), or any credentials file. Never print secret values.
+- Do not change any file until I approve that specific change. Show me the diff first.
+- You may re-run the failing scripts to check a fix, but only after I approve.
+- Never run \`npm audit fix --force\`, install scripts (including \`npm rebuild\`), \`git commit\`, or \`git push\` unless I ask.
+`;
+}
+
 async function claudeScreen(s, f) {
+  await launchClaude(s, buildClaudePrompt(s, f));
+}
+
+/** Starts Claude Code in the project with a task file, after a privacy notice. */
+async function launchClaude(s, task) {
   header(s);
   if (s.cfg.offline) {
     console.log(c.yellow('Offline mode is on. Asking Claude sends data to Anthropic, so it is turned off.'));
@@ -230,8 +459,9 @@ async function claudeScreen(s, f) {
   }
   console.log(c.bold('Before you continue: privacy\n'));
   console.log('  • This starts Claude Code in this folder.');
-  console.log(`  • Claude will read ${OUT_DIR}/findings.json (secret values are already removed from it)`);
-  console.log('    and may read the source files it needs. Anything Claude reads is sent to Anthropic.');
+  console.log(`  • Claude will read the files Gnawky prepared in ${OUT_DIR}/ (scan results have secret values`);
+  console.log('    removed; test logs are not filtered) and may read the source files it needs.');
+  console.log('    Anything Claude reads is sent to Anthropic.');
   console.log('  • Claude is told not to open .env files, keys, or files flagged as containing secrets.');
   console.log(c.gray('    That is an instruction, not a hard block. For a hard block, add deny rules'));
   console.log(c.gray('    in Claude Code\'s permission settings.'));
@@ -239,7 +469,7 @@ async function claudeScreen(s, f) {
   if (!(await confirm('Continue?'))) return;
 
   ensureOutDir(s.dir);
-  fs.writeFileSync(path.join(s.dir, OUT_DIR, 'claude-task.md'), buildClaudePrompt(s, f));
+  fs.writeFileSync(path.join(s.dir, OUT_DIR, 'claude-task.md'), task);
   // A constant prompt is passed, never scanner data, so it is safe even when Windows needs a shell.
   const prompt = `Read ${OUT_DIR}/claude-task.md and follow the instructions in it.`;
   clear();
