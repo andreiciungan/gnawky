@@ -20,12 +20,23 @@ export function performScan(dir, cfg, log = () => {}) {
     offline: Boolean(cfg.offline),
     tools,
     ignoredCount: findings.length - notIgnored.length,
-    findings: notIgnored
-      .filter((f) => rank(f.severity) <= rank(cfg.minSeverity))
-      .sort((a, b) => rank(a.severity) - rank(b.severity)),
+    findings: visibleFindings(notIgnored, cfg),
   };
   writeReports(dir, result);
   return result;
+}
+
+/** Findings at or above the minimum severity, most severe first. */
+export function visibleFindings(findings, cfg) {
+  return findings
+    .filter((f) => rank(f.severity) <= rank(cfg.minSeverity))
+    .sort((a, b) => rank(a.severity) - rank(b.severity));
+}
+
+/** Drops findings listed in .gnawky-ignore.json, then applies the severity filter. */
+export function filterFindings(dir, cfg, findings) {
+  const ignored = new Set(loadIgnores(dir).map((i) => i.fingerprint));
+  return visibleFindings(findings.filter((f) => !ignored.has(f.fingerprint)), cfg);
 }
 
 export function writeReports(dir, result) {
