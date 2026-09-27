@@ -1,0 +1,7 @@
+{
+  "name": "gnawky-marketplace",
+  "owner": { "name": "Your Name" },
+  "plugins": [
+    { "name": "gnawky", "source": "./", "description": "Security scan for Node.js projects with guided fixes." }
+  ]
+}
