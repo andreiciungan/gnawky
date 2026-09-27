@@ -112,3 +112,37 @@ export function select(title, options) {
     render();
   });
 }
+
+// ------------------------------------------------------------------ logo
+
+const LETTERS = {
+  G: [' ██████ ', '██      ', '██   ███', '██    ██', ' ██████ '],
+  N: ['███    ██', '████   ██', '██ ██  ██', '██  ██ ██', '██   ████'],
+  A: [' █████ ', '██   ██', '███████', '██   ██', '██   ██'],
+  W: ['██     ██', '██     ██', '██  █  ██', '██ ███ ██', ' ███ ███ '],
+  K: ['██   ██', '██  ██ ', '█████  ', '██  ██ ', '██   ██'],
+  Y: ['██    ██', ' ██  ██ ', '  ████  ', '   ██   ', '   ██   '],
+};
+const LOGO_ROWS = [0, 1, 2, 3, 4].map((i) => [...'GNAWKY'].map((ch) => LETTERS[ch][i]).join(' '));
+const LOGO_WIDTH = Math.max(...LOGO_ROWS.map((r) => r.length));
+const GRADIENT = [51, 45, 39, 33, 27]; // cyan to blue (256-color palette)
+export const TAGLINE = 'gnaws through your code · watches like a hawk';
+
+const center = (s, width) => ' '.repeat(Math.max(0, Math.floor((width - visibleLen(s)) / 2))) + s;
+
+/** Big centered logo, or a one-line title when the terminal is small. */
+export function printLogo() {
+  const cols = process.stdout.columns || 80;
+  const rows = process.stdout.rows || 24;
+  if (cols < LOGO_WIDTH + 4 || rows < 30) {
+    console.log(`${c.bold(c.cyan('GNAWKY'))}  ${c.gray(TAGLINE)}\n`);
+    return;
+  }
+  const width = Math.min(cols, 80);
+  console.log();
+  LOGO_ROWS.forEach((row, i) => {
+    const line = center(row.padEnd(LOGO_WIDTH), width);
+    console.log(useColor ? `\x1b[38;5;${GRADIENT[i]}m${line}\x1b[0m` : line);
+  });
+  console.log(`\n${center(c.gray(TAGLINE), width)}\n`);
+}

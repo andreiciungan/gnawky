@@ -27,8 +27,11 @@ export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000, env = {} } = {
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '', error: res.error };
 }
 
+// gitleaks has no --version flag; it uses a subcommand.
+export const VERSION_ARGS = { gitleaks: ['version'] };
+
 export function isAvailable(cmd) {
-  const r = run(cmd, ['--version'], { timeoutMs: 15000 });
+  const r = run(cmd, VERSION_ARGS[cmd] ?? ['--version'], { timeoutMs: 15000 });
   return !r.error && r.status === 0;
 }
 
