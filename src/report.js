@@ -18,7 +18,7 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
 
   out.push('## Scanners', '');
   for (const t of tools) {
-    out.push(t.status === 'ran' ? `- **${t.name}:** ran, ${t.count} finding(s)` : `- **${t.name}:** ${t.status} (${cell(t.message)})`);
+    out.push(t.status === 'ran' ? `- **${t.name}:** ran, ${t.count} finding(s)${t.note ? ` (${t.note})` : ''}` : `- **${t.name}:** ${t.status} (${cell(t.message)})`);
   }
   out.push('');
 

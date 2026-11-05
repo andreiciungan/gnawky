@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeFinding } from './finding.js';
-import { packageManager } from './pm.js';
+import { packageManager, auditName } from './pm.js';
 import { scanYarnAudit } from './yarn.js';
 import { scanAudit, AUDIT_TOOL } from './audit.js';
 
@@ -28,6 +28,47 @@ export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000, env = {} } = {
     env: { ...process.env, NO_COLOR: '1', ...env },
   });
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '', error: res.error };
+}
+
+/**
+ * Same as run(), but without blocking, so the app can show progress while a
+ * scanner works. Resolves to { status, stdout, stderr, error }; never rejects.
+ */
+export function runAsync(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000, env = {} } = {}) {
+  const viaShell = IS_WIN && SHELL_SHIMS.has(cmd);
+  const MAX = 256 * 1024 * 1024;
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let error = null;
+    let child;
+    try {
+      child = spawn(viaShell ? `${cmd}.cmd` : cmd, args, {
+        cwd, shell: viaShell, env: { ...process.env, NO_COLOR: '1', ...env },
+      });
+    } catch (e) {
+      resolve({ status: null, stdout, stderr, error: e });
+      return;
+    }
+    const stop = (e) => {
+      error ??= e;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5000).unref();
+    };
+    const timer = setTimeout(() => stop(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 60000)} min`), { code: 'ETIMEDOUT' })), timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d) => {
+      stdout += d;
+      if (stdout.length > MAX) stop(Object.assign(new Error('output too large'), { code: 'ENOBUFS' }));
+    });
+    child.stderr.on('data', (d) => { if (stderr.length < MAX) stderr += d; });
+    child.on('error', (e) => { error ??= e; });
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr, error });
+    });
+  });
 }
 
 // gitleaks has no --version flag; it uses a subcommand.
@@ -84,11 +125,11 @@ function npmFix(fixAvailable, direct) {
   };
 }
 
-export function scanNpmAudit(dir) {
+export async function scanNpmAudit(dir) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(dir, f)));
   if (!hasLock) return { skipped: 'no lockfile (create one with: npm install --package-lock-only --ignore-scripts, or yarn install)' };
 
-  const r = run('npm', ['audit', '--json'], { cwd: dir });
+  const r = await runAsync('npm', ['audit', '--json'], { cwd: dir });
   let data;
   try {
     data = JSON.parse(r.stdout);
@@ -127,11 +168,11 @@ export function scanNpmAudit(dir) {
  * Dependency audit for the project's package manager: npm audit for package-lock.json,
  * yarn audit for a Yarn 1 yarn.lock. Returns `name` so reports show which one ran.
  */
-export function scanDependencies(dir) {
+export async function scanDependencies(dir) {
   const pm = packageManager(dir);
   if (pm === 'yarn') {
     if (!isAvailable('yarn')) return { name: 'yarn-audit', skipped: 'yarn not installed (npm install -g yarn)' };
-    return { name: 'yarn-audit', ...scanYarnAudit(dir) };
+    return { name: 'yarn-audit', ...(await scanYarnAudit(dir)) };
   }
   if (pm === 'yarn-berry') return { skipped: 'Yarn 2+ (Berry) lockfiles are not supported yet' };
   if (pm === 'pnpm') return { skipped: 'pnpm lockfiles are not supported yet' };
@@ -140,7 +181,7 @@ export function scanDependencies(dir) {
 
 // ----------------------------------------------------------------- gitleaks
 
-export function scanGitleaks(dir) {
+export async function scanGitleaks(dir) {
   if (!isAvailable('gitleaks')) return { skipped: 'gitleaks not installed' };
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gnawky-'));
@@ -150,7 +191,8 @@ export function scanGitleaks(dir) {
   if (!fs.existsSync(path.join(dir, '.git'))) args.push('--no-git');
 
   try {
-    const r = run('gitleaks', args);
+    const r = await runAsync('gitleaks', args, { timeoutMs: 30 * 60 * 1000 });
+    if (r.error?.code === 'ETIMEDOUT') return { error: `gitleaks ${r.error.message}` };
     if (r.error || r.status !== 0) return { error: `gitleaks failed: ${r.stderr.slice(0, 300)}` };
     const items = JSON.parse(fs.readFileSync(reportPath, 'utf8') || '[]');
     // Deliberately never copy Secret/Match fields: the report must not leak secrets.
@@ -184,14 +226,33 @@ export function scanGitleaks(dir) {
 
 const SEMGREP_SEVERITY = { ERROR: 'high', WARNING: 'medium', INFO: 'low' };
 
-export function scanSemgrep(dir, configs = ['p/javascript', 'p/nodejsscan']) {
+// Test code rarely matters for security, and mocks/fixtures are often the biggest
+// files in a project, which makes semgrep's taint rules very slow. gitleaks still
+// scans these files for secrets.
+export const TEST_EXCLUDES = ['__mocks__', '__tests__', '__fixtures__', 'fixtures', 'test', 'tests', '*.spec.*', '*.test.*'];
+const TEST_DIRS = new Set(TEST_EXCLUDES.filter((p) => !p.includes('*')));
+const isTestPath = (p) => p.split('/').some((seg) => TEST_DIRS.has(seg)) || /\.(spec|test)\./.test(path.basename(p));
+const CODE_FILE = /\.[cm]?[jt]sx?$/;
+
+/** Roughly how many JS/TS files semgrep will look at (git-tracked files), or null outside git. */
+export function countCodeFiles(dir, skipTests) {
+  const r = run('git', ['ls-files', '-z'], { cwd: dir, timeoutMs: 30000 });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout.split('\0').filter((f) => CODE_FILE.test(f) && !(skipTests && isTestPath(f))).length;
+}
+
+export async function scanSemgrep(dir, configs = ['p/javascript', 'p/nodejsscan'], { skipTests = true } = {}) {
   if (!isAvailable('semgrep')) return { skipped: 'semgrep not installed' };
 
   const args = ['scan', '--json', '--quiet', '--metrics=off'];
   for (const c of configs) args.push('--config', c);
+  if (skipTests) for (const p of TEST_EXCLUDES) args.push('--exclude', p);
   args.push(dir);
 
-  const r = run('semgrep', args);
+  const r = await runAsync('semgrep', args, { timeoutMs: 30 * 60 * 1000 });
+  if (r.error?.code === 'ETIMEDOUT') {
+    return { error: `semgrep ${r.error.message}. Try fewer rulesets in Settings${skipTests ? '' : ', or skip test files'}.` };
+  }
   let data;
   try {
     data = JSON.parse(r.stdout);
@@ -217,48 +278,60 @@ export function scanSemgrep(dir, configs = ['p/javascript', 'p/nodejsscan']) {
         : { type: 'manual', detail: 'Review the flagged code; see the rule documentation for the safe pattern.' },
     });
   });
-  return { findings };
+  return { findings, note: skipTests ? 'test and mock files skipped' : null };
 }
 
 // ---------------------------------------------------------------------- all
 
 const isRemoteRule = (cfg) => /^(p|r|s)\//.test(cfg) || /^https?:/.test(cfg) || cfg === 'auto';
 
-export function runAllScanners(dir, log = () => {}, opts = {}) {
+export async function runAllScanners(dir, log = () => {}, opts = {}) {
   const enabled = opts.enabled ?? {};
   const offline = Boolean(opts.offline);
   const semgrepConfigs = opts.semgrepConfigs ?? ['p/javascript', 'p/nodejsscan'];
+  const skipTests = opts.skipTests ?? true;
+  const semgrepRules = offline ? semgrepConfigs.filter((c) => !isRemoteRule(c)) : semgrepConfigs;
 
+  const semgrepLabel = () => {
+    const n = countCodeFiles(dir, skipTests);
+    const plural = (k, word) => `${k.toLocaleString('en-US')} ${word}${k === 1 ? '' : 's'}`;
+    const files = n === null ? 'the project' : plural(n, 'file');
+    return `running semgrep on ${files} (${plural(semgrepRules.length, 'ruleset')}${skipTests ? ', tests skipped' : ''})`;
+  };
+  // [name, label (string or function, only called when the step runs), scan]
   const scanners = [
-    ['npm-audit', () => (offline
+    ['npm-audit', () => `running ${auditName(packageManager(dir))}`, () => (offline
       ? { skipped: 'offline mode (the dependency audit needs the npm registry)' }
       : scanDependencies(dir))],
-    ['gitleaks', () => scanGitleaks(dir)],
-    ['semgrep', () => {
-      if (!offline) return scanSemgrep(dir, semgrepConfigs);
-      const local = semgrepConfigs.filter((c) => !isRemoteRule(c));
-      return local.length
-        ? scanSemgrep(dir, local)
-        : { skipped: 'offline mode (set a local rules file in Settings)' };
-    }],
+    ['gitleaks', 'running gitleaks on your files and git history', () => scanGitleaks(dir)],
+    ['semgrep', semgrepLabel, () => (semgrepRules.length
+      ? scanSemgrep(dir, semgrepRules, { skipTests })
+      : { skipped: 'offline mode (set a local rules file in Settings)' })],
     // Not a scanner run: imports the latest full audit's confirmed findings from disk.
-    [AUDIT_TOOL, () => scanAudit(dir)],
+    [AUDIT_TOOL, 'importing the latest full audit', () => scanAudit(dir)],
   ];
 
   const findings = [];
   const tools = [];
-  for (const [name, fn] of scanners) {
+  for (const [name, label, fn] of scanners) {
     if (enabled[name] === false) {
       tools.push({ name, status: 'skipped', message: 'disabled in settings' });
       continue;
     }
-    log(`  running ${name}…`);
-    const res = fn();
+    const text = typeof label === 'function' ? label() : label;
+    // onStep shows live progress (the app's ticker); it returns a function that ends the line.
+    const done = opts.onStep ? opts.onStep(text) : (log(`  ${text}…`), () => {});
+    const started = Date.now();
+    const res = await fn();
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const toolName = res.name ?? name;
     if (res.findings) {
       findings.push(...res.findings);
-      tools.push({ name: res.name ?? name, status: 'ran', count: res.findings.length });
+      tools.push({ name: toolName, status: 'ran', count: res.findings.length, seconds, ...(res.note ? { note: res.note } : {}) });
+      done(`${toolName}: ${res.findings.length} finding(s)`, 'ok');
     } else {
-      tools.push({ name: res.name ?? name, status: res.skipped ? 'skipped' : 'error', message: res.skipped ?? res.error });
+      tools.push({ name: toolName, status: res.skipped ? 'skipped' : 'error', message: res.skipped ?? res.error, seconds });
+      done(`${toolName}: ${res.skipped ? 'skipped' : 'failed'}`, res.skipped ? 'skip' : 'fail');
     }
   }
   return { findings, tools };

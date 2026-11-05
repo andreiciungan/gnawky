@@ -2,7 +2,7 @@
 // re-resolving yarn.lock entries, or a "resolutions" override in package.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { run } from './scanners.js';
+import { run, runAsync } from './scanners.js';
 import { makeFinding } from './finding.js';
 import { PKG_NAME, PKG_VERSION } from './pm.js';
 import {
@@ -185,8 +185,8 @@ function yarnFix(name, advisories, entries, pkg, advised = new Set()) {
 
 // ------------------------------------------------------------ audit
 
-export function scanYarnAudit(dir) {
-  const r = run('yarn', ['audit', '--json', '--non-interactive'], { cwd: dir });
+export async function scanYarnAudit(dir) {
+  const r = await runAsync('yarn', ['audit', '--json', '--non-interactive'], { cwd: dir });
   const lines = r.stdout.split('\n').filter((l) => l.trim()).map((l) => {
     try { return JSON.parse(l); } catch { return null; }
   }).filter(Boolean);

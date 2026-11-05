@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { c, clear, ask, confirm, pause, select, sevTag, printLogo } from './ui.js';
+import { c, clear, ask, confirm, pause, select, sevTag, printLogo, ticker, fmtDuration } from './ui.js';
 import {
   loadConfig, saveConfig, configExists, ensureOutDir, OUT_DIR, DEFAULT_CONFIG,
 } from './config.js';
@@ -112,15 +112,16 @@ function dropFromResult(s, fingerprints) {
 async function scanScreen(s) {
   header(s);
   console.log(`${c.bold('Scanning')} ${c.gray('(read-only: nothing in your project is changed)')}\n`);
-  s.result = performScan(s.dir, s.cfg, (m) => console.log(c.gray(m)));
+  s.result = await performScan(s.dir, s.cfg, (m) => console.log(c.gray(m)), { onStep: (label) => ticker(label) });
   s.browse = null;
   s.stale = false;
 
   console.log();
   for (const t of s.result.tools) {
     const icon = t.status === 'ran' ? c.green('✔') : t.status === 'skipped' ? c.yellow('–') : c.red('✖');
-    const msg = t.status === 'ran' ? `${t.count} finding(s)` : c.gray(t.message);
-    console.log(`  ${icon} ${t.name.padEnd(10)} ${msg}`);
+    const msg = t.status === 'ran' ? `${t.count} finding(s)${t.note ? c.gray(`  ·  ${t.note}`) : ''}` : c.gray(t.message);
+    const time = t.seconds >= 1 ? c.gray(`  ·  ${fmtDuration(t.seconds)}`) : '';
+    console.log(`  ${icon} ${t.name.padEnd(12)} ${msg}${time}`);
   }
   if (s.result.tools.every((t) => t.status !== 'ran')) {
     console.log(c.yellow('\n  ⚠ No scanner ran, so "no findings" does NOT mean the project is safe.'));
@@ -383,8 +384,10 @@ async function verifyScreen(s, report) {
   let audit = null;
   let auditAll = null;
   if (!s.cfg.offline && s.cfg.scanners['npm-audit'] !== false) {
-    console.log(c.gray(`\nRunning ${auditName(s.pm)} again…`));
-    const res = scanDependencies(s.dir);
+    console.log();
+    const done = ticker(`running ${auditName(s.pm)} again`);
+    const res = await scanDependencies(s.dir);
+    done(res.findings ? `${auditName(s.pm)}: ${res.findings.length} finding(s)` : `${auditName(s.pm)} failed`, res.findings ? 'ok' : 'fail');
     if (res.findings) {
       auditAll = filterFindings(s.dir, s.cfg, res.findings);
       audit = diffFindings(s.result.findings.filter(isDepAudit), auditAll);
@@ -820,6 +823,7 @@ async function settingsScreen(s) {
       { label: `Scanner gitleaks: ${onoff(s.cfg.scanners.gitleaks)}`, value: 'gitleaks' },
       { label: `Scanner semgrep: ${onoff(s.cfg.scanners.semgrep)}`, value: 'semgrep' },
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
+      { label: `Semgrep skips test and mock files: ${onoff(s.cfg.semgrepSkipTests !== false)}  ${c.gray('(much faster; gitleaks still checks them)')}`, value: 'tests' },
       { label: 'Run setup again (detect stack, install tools)', value: 'setup' },
       { label: 'Reset to defaults', value: 'reset' },
       { label: 'Back', value: null },
@@ -830,6 +834,8 @@ async function settingsScreen(s) {
       if (v) s.cfg.minSeverity = v;
     } else if (pick === 'offline') {
       s.cfg.offline = !s.cfg.offline;
+    } else if (pick === 'tests') {
+      s.cfg.semgrepSkipTests = s.cfg.semgrepSkipTests === false;
     } else if (pick === 'rules') {
       console.log(c.gray('\nRegistry rulesets (like p/javascript) or local rule files (like ./rules.yml).'));
       console.log(c.gray('In offline mode only local files are used.'));
