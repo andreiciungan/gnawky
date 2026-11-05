@@ -44,16 +44,28 @@ export async function pause() {
 }
 
 /**
- * Arrow-key menu. options: [{ label, value, disabled }]
+ * Arrow-key menu. options: [{ label, value, disabled }], or { static: label } for a
+ * row that is only shown (a blank line with ''), never selected.
  * Resolves with the chosen value, or null for q / Esc (= back).
+ * Options may carry their own `number` (e.g. 10-18 on page 2 of a list); typing it
+ * moves the cursor there and Enter selects, instead of the default 1-9 instant pick.
+ * opts.initial: index to start on. opts.keys: { keyName: value } extra shortcuts
+ * (e.g. { left: 'prev' }), shown with opts.hint in the help line.
  */
-export function select(title, options) {
+export function select(title, options, { initial = null, keys = {}, hint = '' } = {}) {
   return new Promise((resolve, reject) => {
     const input = process.stdin;
     const cols = () => (process.stdout.columns || 80) - 4;
     const maxVisible = () => Math.max(5, (process.stdout.rows || 24) - 10);
-    let idx = Math.max(0, options.findIndex((o) => !o.disabled));
+    options = options.map((o) => ('static' in o ? { ...o, disabled: true } : o));
+    let idx = initial !== null && options[initial] && !options[initial].disabled
+      ? initial
+      : Math.max(0, options.findIndex((o) => !o.disabled));
     let drawn = 0;
+    const numbered = options.some((o) => Number.isInteger(o.number));
+    const numWidth = numbered ? String(Math.max(...options.map((o) => o.number ?? 0))).length + 1 : 2;
+    let typed = '';
+    let typedAt = 0;
 
     const render = () => {
       if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
@@ -64,14 +76,18 @@ export function select(title, options) {
       if (start > 0) lines.push(c.gray('    ↑ more'));
       for (let i = start; i < start + size; i++) {
         const o = options[i];
-        const num = i < 9 ? `${i + 1}.` : '  ';
+        if ('static' in o) {
+          lines.push(o.static ? `${' '.repeat(numWidth + 3)}${truncate(o.static, cols())}` : '');
+          continue;
+        }
+        const num = (numbered ? (Number.isInteger(o.number) ? `${o.number}.` : '') : i < 9 ? `${i + 1}.` : '').padStart(numWidth);
         let label = truncate(`${num} ${o.label}`, cols());
         if (o.disabled) label = c.gray(label.replace(ANSI, ''));
         else if (i === idx) label = c.cyan(label);
         lines.push(`${i === idx ? c.cyan('❯') : ' '} ${label}`);
       }
       if (start + size < n) lines.push(c.gray('    ↓ more'));
-      lines.push(c.gray('↑/↓ move · Enter select · 1-9 jump · q/Esc back'));
+      lines.push(c.gray(`↑/↓ move · Enter select · ${numbered ? 'type a number to jump' : '1-9 jump'}${hint ? ` · ${hint}` : ''} · q/Esc back`));
       process.stdout.write(lines.join('\n') + '\n');
       drawn = lines.length;
     };
@@ -97,7 +113,19 @@ export function select(title, options) {
       else if (key.name === 'down' || key.name === 'j') move(1);
       else if (key.name === 'return' || key.name === 'enter') return finish(options[idx]?.value ?? null);
       else if (key.name === 'escape' || str === 'q') return finish(null);
-      else if (/^[1-9]$/.test(str ?? '')) {
+      else if (key.name && Object.hasOwn(keys, key.name)) return finish(keys[key.name]);
+      else if (numbered && /^[0-9]$/.test(str ?? '')) {
+        // Digits typed within a second build one number (1, then 2 → 12).
+        typed = Date.now() - typedAt < 1000 ? typed + str : str;
+        typedAt = Date.now();
+        let i = options.findIndex((o) => o.number === Number(typed));
+        if (i === -1) {
+          typed = str;
+          i = options.findIndex((o) => o.number === Number(typed));
+        }
+        if (i === -1 || options[i].disabled) return;
+        idx = i;
+      } else if (!numbered && /^[1-9]$/.test(str ?? '')) {
         const o = options[Number(str) - 1];
         if (o && !o.disabled) return finish(o.value);
         return;

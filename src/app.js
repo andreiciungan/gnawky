@@ -91,6 +91,7 @@ async function scanScreen(s) {
   header(s);
   console.log(`${c.bold('Scanning')} ${c.gray('(read-only: nothing in your project is changed)')}\n`);
   s.result = performScan(s.dir, s.cfg, (m) => console.log(c.gray(m)));
+  s.browse = null;
   s.stale = false;
 
   console.log();
@@ -115,6 +116,9 @@ async function scanScreen(s) {
 }
 
 async function viewScreen(s) {
+  // Where the user was (page and finding), kept on `s` so it survives opening a
+  // finding and leaving the screen; a new scan starts again at the top.
+  s.browse ??= { page: 0, fingerprint: null };
   for (;;) {
     header(s);
     const list = s.result.findings;
@@ -123,11 +127,43 @@ async function viewScreen(s) {
       await pause();
       return;
     }
-    const pick = await select(`Findings (${list.length}). Choose one for details`, [
-      ...list.map((f) => ({ label: `${sevTag(f.severity)} ${f.title}  ${c.gray(loc(f))}`, value: f })),
-      { label: 'Back', value: null },
-    ]);
+    const size = 9;
+    const pages = Math.ceil(list.length / size);
+    const at = list.findIndex((f) => f.fingerprint === s.browse.fingerprint);
+    // Back from a finding that is still listed: its page. Otherwise (e.g. it was ignored) the same page number.
+    const page = Math.min(at >= 0 && s.browse.fromDetail ? Math.floor(at / size) : s.browse.page, pages - 1);
+    const items = list.slice(page * size, (page + 1) * size);
+
+    const options = items.map((f, i) => ({
+      label: `${sevTag(f.severity)} ${f.title}  ${c.gray(loc(f))}`, value: f, number: page * size + i + 1,
+    }));
+    options.push({ static: '' });
+    if (pages > 1) {
+      const prev = page > 0 ? c.cyan('← Previous page') : c.gray('← Previous page');
+      const next = page < pages - 1 ? c.cyan('Next page →') : c.gray('Next page →');
+      options.push({ static: `${prev}    ${c.gray('·')}    ${next}` });
+    }
+    options.push({ label: 'Back', value: null });
+
+    const first = page * size + 1;
+    const title = pages > 1
+      ? `Findings ${first}-${first + items.length - 1} of ${list.length}  ${c.gray(`(page ${page + 1} of ${pages})`)}. Choose one for details`
+      : `Findings (${list.length}). Choose one for details`;
+    const cursor = items.findIndex((f) => f.fingerprint === s.browse.fingerprint);
+    const pick = await select(title, options, {
+      initial: cursor >= 0 ? cursor : null,
+      keys: pages > 1 ? { right: 'next', left: 'prev' } : {},
+      hint: pages > 1 ? '←/→ page' : '',
+    });
+
+    s.browse.fromDetail = false;
+    if (pick === 'next' || pick === 'prev') {
+      s.browse = { page: Math.min(Math.max(0, page + (pick === 'next' ? 1 : -1)), pages - 1), fingerprint: null };
+      continue;
+    }
+    s.browse.page = page;
     if (!pick) return;
+    s.browse = { page, fingerprint: pick.fingerprint, fromDetail: true };
     await detailScreen(s, pick);
   }
 }
