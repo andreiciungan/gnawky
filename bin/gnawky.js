@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SEVERITY_ORDER } from '../src/finding.js';
 import { loadConfig } from '../src/config.js';
-import { performScan, reportFile } from '../src/scan.js';
+import { performScan, reportFile, htmlReportFile } from '../src/scan.js';
 
 const HELP = `Gnawky - gnaws through your code, watches like a hawk.
 Security scanner for Node.js projects.
@@ -12,7 +12,7 @@ Interactive app (recommended):
   cd your-project && gnawky
 
 Headless mode (CI, scripts, the Claude plugin):
-  gnawky [path] --no-ui          scan and write .gnawky/security-report.md
+  gnawky [path] --no-ui          scan and write .gnawky/security-report.md and .html
   gnawky [path] --json           print findings as JSON on stdout
   gnawky [path] --ci             exit with code 1 if findings remain
 
@@ -77,6 +77,7 @@ async function main() {
     const counts = SEVERITY_ORDER.map((s) => [s, result.findings.filter((f) => f.severity === s).length]).filter(([, n]) => n);
     console.log(`\n${result.findings.length} finding(s)` + (counts.length ? `: ${counts.map(([s, n]) => `${n} ${s}`).join(', ')}` : ''));
     console.log(`Report: ${reportFile(dir)}`);
+    console.log(`HTML report: ${htmlReportFile(dir)}`);
   }
   if (o.ci && result.tools.every((t) => t.status !== 'ran')) {
     console.error('No scanner ran, so the result proves nothing. Failing the CI check.');

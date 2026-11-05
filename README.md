@@ -62,6 +62,7 @@ What would you like to do?
 - **Verified fixes**: before applying dependency fixes, you can have Gnawky run your `test`, `build`, `lint` and `typecheck` scripts before and after the change (all at once, or one package at a time with automatic undo of any upgrade that breaks them). It also checks `npm ls` (or `yarn check --verify-tree`) for broken dependency trees, warns about packages that don't support your Node version, and compares the audit before and after. Then you keep the branch, undo everything, or ask Claude to investigate a failure.
 - **Browse findings**: open any finding for details and act on just that one.
 - **Ask Claude for help**: starts Claude Code with the scan results, after a privacy notice (needs Claude Code; disabled in offline mode).
+- **View report**: shows the Markdown report and opens the HTML report in your browser.
 - **Ignored findings**: see every ignore decision with its reason, and restore any of them.
 - **Settings**: minimum severity, offline mode, scanners on/off, semgrep rules. Saved per project in `.gnawky/config.json`.
 - **Check installed tools**: shows which scanners are missing and installs them (Homebrew/pipx) if you want.
@@ -69,11 +70,13 @@ What would you like to do?
 Headless mode for CI and scripts:
 
 ```bash
-gnawky --no-ui                      # scan and write the report
+gnawky --no-ui                      # scan and write the reports
 gnawky --ci --min-severity high     # exit 1 if findings remain, 2 if no scanner could run
 gnawky --json                       # machine-readable output (used by the Claude plugin)
 gnawky --offline                    # nothing leaves this computer
 ```
+
+Every scan writes three files to `.gnawky/`: `findings.json`, `security-report.md`, and `security-report.html`. The HTML report is a single self-contained file (no external scripts, styles or fonts, so it works offline). It has severity tiles, a scanner summary, and every finding with full details, plus filters by severity and tool and a text search. It supports dark mode and prints cleanly. In CI, keep it as a build artifact.
 
 Requires Node 18+ and a `package-lock.json` or a Yarn 1 (Classic) `yarn.lock`.
 
