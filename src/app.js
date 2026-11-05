@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { c, clear, ask, confirm, pause, select, sevTag, printLogo, ticker, fmtDuration } from './ui.js';
+import { c, clear, ask, confirm, pause, select, sevTag, printLogo, wordmark, ticker, fmtDuration } from './ui.js';
 import {
   loadConfig, saveConfig, configExists, ensureOutDir, OUT_DIR, DEFAULT_CONFIG,
 } from './config.js';
@@ -53,14 +53,18 @@ function summary(findings) {
     .join(', ');
 }
 
-function header(s, { logo = false } = {}) {
+// HEADER_LINES: what header() prints under the logo (name, status, rule, blank line).
+const HEADER_LINES = 4;
+
+/** `below`: lines the screen prints after the header, so the big logo is only shown when it all fits. */
+function header(s, { logo = false, below } = {}) {
   clear();
   const name = s.pkg?.name ?? path.basename(s.dir);
   if (logo) {
-    printLogo();
+    printLogo(below === undefined ? undefined : { below: HEADER_LINES + below });
     console.log(`${c.bold(name)}  ${c.gray(s.dir)}`);
   } else {
-    console.log(`${c.bold(c.accent('Gnawky'))}  ${c.bold(name)}  ${c.gray(s.dir)}`);
+    console.log(`${wordmark()}  ${c.bold(name)}  ${c.gray(s.dir)}`);
   }
   const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
   if (s.cfg.offline) bits.push(c.yellow('offline mode'));
@@ -1041,10 +1045,9 @@ export async function startApp(dir) {
     }
     if (!configExists(dir)) await setupScreen(s, { firstRun: true });
     for (;;) {
-      header(s, { logo: true });
       const n = s.result?.findings.length ?? 0;
       const ignored = safeIgnores(dir).length;
-      const choice = await select('What would you like to do?', [
+      const options = [
         { label: s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
         { label: `Review & fix findings${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
         { label: 'Browse findings', value: 'view', disabled: !s.result },
@@ -1056,7 +1059,10 @@ export async function startApp(dir) {
         { label: 'Settings', value: 'settings' },
         { label: 'Check installed tools', value: 'doctor' },
         { label: 'Quit', value: 'quit' },
-      ]);
+      ];
+      // The menu takes its options plus a title, a help line and the cursor line.
+      header(s, { logo: true, below: options.length + 3 });
+      const choice = await select('What would you like to do?', options);
       if (choice === null || choice === 'quit') break;
       await SCREENS[choice](s);
     }
