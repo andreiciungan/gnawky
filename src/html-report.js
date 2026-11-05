@@ -1,4 +1,5 @@
 import { SEVERITY_ORDER } from './finding.js';
+import { VERDICTS, URGENCIES } from './triage.js';
 
 // Self-contained HTML report: no external CSS, JS, fonts or images, so it opens
 // offline and viewing it never sends anything anywhere. Every value comes from
@@ -28,10 +29,17 @@ function fixBadge(type) {
   return `<span class="fix fix-${kind}">${esc(label)}</span>`;
 }
 
-function findingCard(f, i) {
+function triageBadges(t) {
+  const v = VERDICTS[t.verdict] ? t.verdict : 'needs-review';
+  const u = URGENCIES[t.urgency] ? t.urgency : 'low';
+  return `<span class="tri tri-${v}">${esc(VERDICTS[v])}</span>${v === 'false-positive' ? '' : `<span class="tri urg-${u}">${esc(URGENCIES[u])}</span>`}`;
+}
+
+function findingCard(f, i, triage) {
+  const t = triage.entries[f.fingerprint];
   const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : null;
   const url = safeUrl(f.url);
-  const search = [f.title, f.tool, f.ruleId, f.file, f.package, f.description, f.fix?.detail, ...(f.cwe ?? [])].join(' ').toLowerCase();
+  const search = [f.title, f.tool, f.ruleId, f.file, f.package, f.description, f.fix?.detail, t?.reason, ...(f.cwe ?? [])].join(' ').toLowerCase();
   const rows = [
     ['Tool / rule', `${esc(f.tool)} / <code>${esc(f.ruleId)}</code>`],
     f.package && ['Package', `<code>${esc(f.package)}</code>`],
@@ -39,22 +47,26 @@ function findingCard(f, i) {
     f.cwe?.length && ['CWE', f.cwe.map(esc).join(', ')],
     f.description && ['Details', esc(f.description)],
     ['Suggested fix', `${fixBadge(f.fix?.type)} ${esc(f.fix?.detail)}`],
+    t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
     ['Reference', url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : f.url ? esc(f.url) : null],
     ['ID', `<code>${esc(f.fingerprint)}</code>`],
   ].filter((r) => r && r[1]);
-  return `<details class="finding" data-sev="${esc(f.severity)}" data-tool="${esc(f.tool)}" data-search="${esc(search)}"${i < 3 ? ' open' : ''}>
-<summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(f.title)}</span><span class="meta">${esc(f.tool)}${loc ? ` · ${esc(loc)}` : ''}</span></summary>
+  return `<details class="finding" data-sev="${esc(f.severity)}" data-tool="${esc(f.tool)}" data-verdict="${t ? esc(t.verdict) : 'none'}" data-urgency="${t ? esc(t.urgency) : 'none'}" data-search="${esc(search)}"${i < 3 ? ' open' : ''}>
+<summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(f.title)}</span>${t ? triageBadges(t) : ''}<span class="meta">${esc(f.tool)}${loc ? ` · ${esc(loc)}` : ''}</span></summary>
 <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
 </details>`;
 }
 
-export function renderHtml({ target, date, findings, tools, ignoredCount, minSeverity, offline }) {
+export function renderHtml({ target, date, findings, tools, ignoredCount, minSeverity, offline }, triage = { entries: {} }) {
   const project = target.split(/[\\/]/).filter(Boolean).pop() ?? target;
   const when = new Date(date);
   const dateText = isNaN(when) ? String(date) : when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
   const counts = SEVERITY_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length]);
   const toolNames = [...new Set(findings.map((f) => f.tool))];
   const noneRan = tools.every((t) => t.status !== 'ran');
+  const tri = findings.map((f) => triage.entries[f.fingerprint]).filter(Boolean);
+  const fixNow = tri.filter((t) => t.verdict !== 'false-positive' && t.urgency === 'now').length;
+  const falsePos = tri.filter((t) => t.verdict === 'false-positive').length;
 
   const tiles = counts
     .map(([s, n]) => `<button class="tile sev-tile-${s}${n ? '' : ' empty'}" data-sev="${s}" aria-pressed="false"><span class="n">${n}</span><span class="l">${s}</span></button>`)
@@ -107,9 +119,14 @@ ul.scanners li{padding:8px 14px;border-top:1px solid var(--border)}ul.scanners l
 .fix-risky{background:color-mix(in srgb,var(--medium) 20%,transparent);color:var(--medium)}
 .fix-breaking{background:color-mix(in srgb,var(--critical) 18%,transparent);color:var(--critical)}
 .fix-manual{background:var(--code);color:var(--muted)}
+.tri{font-size:11px;font-weight:600;border-radius:4px;padding:1px 6px;margin-left:6px;white-space:nowrap;background:var(--code);color:var(--muted)}
+.tri-real{color:var(--high)}.tri-false-positive{color:var(--ok)}.urg-now{background:color-mix(in srgb,var(--critical) 18%,transparent);color:var(--critical)}
+.urg-soon{background:color-mix(in srgb,var(--medium) 20%,transparent);color:var(--medium)}
+.claude{display:flex;gap:14px;align-items:center;margin-top:8px}.claude p{margin:0;color:var(--muted);font-size:14px}
+.now-tile{--c:var(--critical);flex:0 0 190px}
 .empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel);border:1px dashed var(--border);border-radius:10px}
 footer{margin-top:40px;font-size:13px;color:var(--muted)}
-@media (max-width:640px){.tiles{grid-template-columns:repeat(3,1fr)}.finding dl{grid-template-columns:1fr}.finding dt{padding-top:10px}.finding dd{padding-top:0}}
+@media (max-width:640px){.tiles{grid-template-columns:repeat(3,1fr)}.claude{flex-direction:column;align-items:stretch}.now-tile{flex:none}.finding dl{grid-template-columns:1fr}.finding dt{padding-top:10px}.finding dd{padding-top:0}}
 @media print{body{background:#fff;color:#000}.controls{display:none}.finding{break-inside:avoid}.finding:not([open]) dl{display:block}}
 </style>
 </head>
@@ -120,6 +137,8 @@ footer{margin-top:40px;font-size:13px;color:var(--muted)}
 <div class="facts"><span><code>${esc(target)}</code></span><span>${esc(dateText)}</span><span>Minimum severity: ${esc(minSeverity ?? 'n/a')}</span>${offline ? '<span>Offline mode</span>' : ''}<span>Ignored via .gnawky-ignore.json: ${ignoredCount ?? 0}</span></div>
 ${noneRan ? '<div class="warn"><b>Warning:</b> no scanner ran successfully, so an empty result does not mean the project is safe.</div>' : ''}
 <div class="tiles">${tiles}</div>
+${tri.length ? `<div class="claude"><button class="tile now-tile" id="fixnow" aria-pressed="false"><span class="n">${fixNow}</span><span class="l">Fix now, says Claude</span></button>
+<p>Claude reviewed ${tri.length} of ${findings.length} findings against the code: ${fixNow} to fix now, ${falsePos} likely false positive(s). These are suggestions, not facts. Check the reason on each finding before you rely on it.</p></div>` : ''}
 
 <h2>Scanners</h2>
 <ul class="scanners">${scanners}</ul>
@@ -128,9 +147,11 @@ ${noneRan ? '<div class="warn"><b>Warning:</b> no scanner ran successfully, so a
 ${findings.length ? `<div class="controls">
 <input id="q" type="search" placeholder="Search title, package, file, rule, CWE…" aria-label="Search findings">
 <select id="tool" aria-label="Filter by tool"><option value="">All tools</option>${toolNames.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
+${tri.length ? `<select id="verdict" aria-label="Filter by Claude's verdict"><option value="">Any verdict</option>${Object.entries(VERDICTS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}<option value="none">not triaged</option></select>
+<select id="order" aria-label="Sort"><option value="sev">Sort: severity</option><option value="claude">Sort: Claude's urgency</option></select>` : ''}
 <select id="toggle" aria-label="Expand or collapse"><option value="">Expand…</option><option value="open">Expand all</option><option value="close">Collapse all</option></select>
 </div>
-<div id="list">${findings.map(findingCard).join('\n')}</div>
+<div id="list">${findings.map((f, i) => findingCard(f, i, triage)).join('\n')}</div>
 <div class="empty-state" id="nomatch" hidden>No findings match the filters.</div>` : '<div class="empty-state">No findings at or above the selected severity.</div>'}
 
 <footer>Generated by Gnawky. This report lists your project's weak spots: keep it private. Secrets are redacted and code snippets are never included.</footer>
@@ -138,11 +159,11 @@ ${findings.length ? `<div class="controls">
 <script>
 (function(){
   var cards=[].slice.call(document.querySelectorAll('.finding'));if(!cards.length)return;
-  var q=document.getElementById('q'),tool=document.getElementById('tool'),sevs=new Set();
+  var q=document.getElementById('q'),tool=document.getElementById('tool'),verdict=document.getElementById('verdict'),order=document.getElementById('order'),now=document.getElementById('fixnow'),list=document.getElementById('list'),sevs=new Set(),onlyNow=false;
   function apply(){
-    var text=q.value.trim().toLowerCase(),t=tool.value,n=0;
+    var text=q.value.trim().toLowerCase(),t=tool.value,v=verdict?verdict.value:'',n=0;
     cards.forEach(function(c){
-      var show=(!sevs.size||sevs.has(c.dataset.sev))&&(!t||c.dataset.tool===t)&&(!text||c.dataset.search.indexOf(text)!==-1);
+      var show=(!sevs.size||sevs.has(c.dataset.sev))&&(!t||c.dataset.tool===t)&&(!v||c.dataset.verdict===v)&&(!onlyNow||(c.dataset.urgency==='now'&&c.dataset.verdict!=='false-positive'))&&(!text||c.dataset.search.indexOf(text)!==-1);
       c.hidden=!show;if(show)n++;
     });
     document.getElementById('shown').textContent='('+n+(n===cards.length?'':' of '+cards.length)+')';
@@ -152,6 +173,15 @@ ${findings.length ? `<div class="controls">
     var s=b.dataset.sev;if(sevs.has(s))sevs.delete(s);else sevs.add(s);b.setAttribute('aria-pressed',sevs.has(s));apply();
   });});
   q.addEventListener('input',apply);tool.addEventListener('change',apply);
+  if(verdict)verdict.addEventListener('change',apply);
+  if(now)now.addEventListener('click',function(){onlyNow=!onlyNow;now.setAttribute('aria-pressed',onlyNow);apply();});
+  var rankU={now:0,soon:1,low:2,none:4},rankS={critical:0,high:1,medium:2,low:3,info:4};
+  function key(c){return c.dataset.verdict==='false-positive'?3:rankU[c.dataset.urgency];}
+  if(order)order.addEventListener('change',function(){
+    cards.slice().sort(function(a,b){return order.value==='claude'?(key(a)-key(b))||(rankS[a.dataset.sev]-rankS[b.dataset.sev]):(+a.dataset.i)-(+b.dataset.i);})
+      .forEach(function(c){list.appendChild(c);});
+  });
+  cards.forEach(function(c,i){c.dataset.i=i;});
   document.getElementById('toggle').addEventListener('change',function(e){
     var open=e.target.value==='open';if(e.target.value)cards.forEach(function(c){if(!c.hidden)c.open=open;});e.target.value='';
   });
