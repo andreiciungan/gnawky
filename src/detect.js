@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './scanners.js';
+import { packageManager } from './pm.js';
 
 // Detection only reads package.json and file names at known places.
 // It never reads file contents beyond that and never walks the whole tree.
@@ -41,9 +42,7 @@ export function detectProject(dir) {
     name: pkg?.name ?? path.basename(dir),
     hasPackageJson: Boolean(pkg),
     depCount: Object.keys(deps).length,
-    lockfile: exists('package-lock.json') || exists('npm-shrinkwrap.json') ? 'npm'
-      : exists('yarn.lock') ? 'yarn'
-        : exists('pnpm-lock.yaml') ? 'pnpm' : null,
+    lockfile: packageManager(dir),
     typescript: Boolean(deps.typescript) || exists('tsconfig.json'),
     frameworks: pick(FRAMEWORKS),
     databases: pick(DATABASES),

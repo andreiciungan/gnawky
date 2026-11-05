@@ -15,7 +15,10 @@ import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
   planSteps, regressions, undoFix,
 } from './fix.js';
-import { isAvailable, IS_WIN, scanNpmAudit } from './scanners.js';
+import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
+import {
+  packageManager, lockfileName, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS,
+} from './pm.js';
 import {
   detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
 } from './verify.js';
@@ -221,14 +224,14 @@ async function chooseVerification(s, plan) {
     console.log(c.gray('    Gnawky will check dependency compatibility, but can\'t check that your project still runs.\n'));
     return { scripts: [], oneAtATime: false };
   }
-  const cmds = (names) => names.map((n) => `npm run ${n}`).join(', ');
+  const cmds = (names) => names.map((n) => runLabel(s.pm, n)).join(', ');
   console.log(c.bold('Check that your project still works?'));
   console.log(c.gray('  Gnawky can run your package.json scripts before and after the fix, so it can tell'));
   console.log(c.gray('  whether the fix broke something or it was already failing.'));
   console.log(`  ${c.yellow('This runs your project\'s own code')} ${c.gray('(tests may start servers or use the network).')}`);
   console.log(c.gray('  Each script gets 15 minutes. Install scripts stay disabled.\n'));
   const choices = [{ label: `Yes, run: ${cmds(available)}`, value: available }];
-  if (available.includes('test') && available.length > 1) choices.push({ label: 'Only: npm run test', value: ['test'] });
+  if (available.includes('test') && available.length > 1) choices.push({ label: `Only: ${runLabel(s.pm, 'test')}`, value: ['test'] });
   choices.push({ label: 'No, only check dependency compatibility', value: [] });
   const scripts = await select('Verify the fix?', choices);
   if (scripts === null) return null;
@@ -247,7 +250,9 @@ async function chooseVerification(s, plan) {
   return { scripts, oneAtATime };
 }
 
-function printVerifyReport(report, audit) {
+function printVerifyReport(pm, report, audit) {
+  const runs = (n) => runLabel(pm, n);
+  const tree = pm === 'yarn' ? 'yarn check' : 'npm ls';
   const ok = (m) => console.log(`  ${c.green('✔')} ${m}`);
   const warn = (m) => console.log(`  ${c.yellow('⚠')} ${m}`);
   const bad = (m) => console.log(`  ${c.red('✖')} ${m}`);
@@ -258,16 +263,17 @@ function printVerifyReport(report, audit) {
   for (const st of report.steps) {
     const label = `${st.label}${st.major ? c.yellow('  (major)') : ''}`;
     if (st.status === 'applied') ok(`${label}  ${c.gray(`${st.findings} finding(s)`)}`);
-    else if (st.status === 'reverted') warn(`${label}  ${c.yellow(`undone: it broke ${st.broke.map((n) => `npm run ${n}`).join(', ')}`)}`);
-    else bad(`${label}  ${c.red('npm failed, not applied')}`);
+    else if (st.status === 'skipped') ok(`${label}  ${c.gray(st.note)}`);
+    else if (st.status === 'reverted') warn(`${label}  ${c.yellow(`undone: it broke ${st.broke.map(runs).join(', ')}`)}`);
+    else bad(`${label}  ${c.red(`${pm === 'yarn' ? 'yarn' : 'npm'} failed, not applied`)}`);
   }
 
   console.log(`\n${c.bold('Compatibility')}`);
   if (report.lsNew.length) {
-    bad(`${report.lsNew.length} new dependency problem(s) found by npm ls:`);
+    bad(`${report.lsNew.length} new dependency problem(s) found by ${tree}:`);
     for (const p of report.lsNew.slice(0, 8)) sub(p);
   } else {
-    ok(`No new dependency problems (npm ls)${report.lsPreexisting ? c.gray(`  ·  ${report.lsPreexisting} that already existed`) : ''}`);
+    ok(`No new dependency problems (${tree})${report.lsPreexisting ? c.gray(`  ·  ${report.lsPreexisting} that already existed`) : ''}`);
   }
   if (report.engines.length) {
     warn(`Packages that say they don't support your Node ${process.version}:`);
@@ -277,7 +283,7 @@ function printVerifyReport(report, audit) {
   }
 
   if (audit) {
-    console.log(`\n${c.bold('npm audit')}`);
+    console.log(`\n${c.bold(auditName(pm))}`);
     const line = `fixed ${audit.fixed.length}  ·  still open ${audit.remaining.length}`;
     if (audit.added.length) {
       warn(`${line}  ·  ${c.yellow(`new ${audit.added.length}`)}`);
@@ -298,18 +304,18 @@ function printVerifyReport(report, audit) {
       const before = report.baseline[n];
       const after = report.after[n];
       if (report.oneAtATime) {
-        if (before.ok) ok(`npm run ${n}  ${c.gray('passed before, and after every change that was kept')}`);
-        else warn(`npm run ${n}  ${c.gray('was already failing before the fix, so it could not judge the changes')}`);
-      } else if (before.ok && after.ok) ok(`npm run ${n}  ${c.gray('passed before and after')}`);
-      else if (before.ok) bad(`npm run ${n}  ${c.red(`passed before, ${after.timedOut ? 'TIMES OUT' : 'FAILS'} after the fix`)}`);
-      else if (after.ok) ok(`npm run ${n}  ${c.gray('failed before, passes now')}`);
-      else warn(`npm run ${n}  ${c.gray('failed before and after (not caused by the fix)')}`);
+        if (before.ok) ok(`${runs(n)}  ${c.gray('passed before, and after every change that was kept')}`);
+        else warn(`${runs(n)}  ${c.gray('was already failing before the fix, so it could not judge the changes')}`);
+      } else if (before.ok && after.ok) ok(`${runs(n)}  ${c.gray('passed before and after')}`);
+      else if (before.ok) bad(`${runs(n)}  ${c.red(`passed before, ${after.timedOut ? 'TIMES OUT' : 'FAILS'} after the fix`)}`);
+      else if (after.ok) ok(`${runs(n)}  ${c.gray('failed before, passes now')}`);
+      else warn(`${runs(n)}  ${c.gray('failed before and after (not caused by the fix)')}`);
     }
   }
 
   const broken = regressions(report);
   console.log();
-  if (broken.length) console.log(c.bold(c.red(`✖ The fix broke: ${broken.map((n) => `npm run ${n}`).join(', ')}`)));
+  if (broken.length) console.log(c.bold(c.red(`✖ The fix broke: ${broken.map(runs).join(', ')}`)));
   else if (report.scripts.length && !report.lsNew.length) console.log(c.bold(c.green('✔ Everything that worked before still works.')));
   console.log();
 }
@@ -319,17 +325,17 @@ async function verifyScreen(s, report) {
   let audit = null;
   let auditAll = null;
   if (!s.cfg.offline && s.cfg.scanners['npm-audit'] !== false) {
-    console.log(c.gray('\nRunning npm audit again…'));
-    const res = scanNpmAudit(s.dir);
+    console.log(c.gray(`\nRunning ${auditName(s.pm)} again…`));
+    const res = scanDependencies(s.dir);
     if (res.findings) {
       auditAll = filterFindings(s.dir, s.cfg, res.findings);
-      audit = diffFindings(s.result.findings.filter((f) => f.tool === 'npm-audit'), auditAll);
+      audit = diffFindings(s.result.findings.filter(isDepAudit), auditAll);
     }
   }
 
   for (;;) {
     header(s);
-    printVerifyReport(report, audit);
+    printVerifyReport(s.pm, report, audit);
     const broken = regressions(report);
     const failed = report.scripts.filter((n) => report.after[n] && !report.after[n].ok);
     const native = broken.length ? packagesWithInstallScripts(s.dir) : [];
@@ -353,7 +359,7 @@ async function verifyScreen(s, report) {
     if (choice === 'output') {
       header(s);
       for (const n of failed) {
-        console.log(c.bold(`npm run ${n}`) + c.gray(`  (last lines; full log: ${path.relative(s.dir, report.after[n].logFile)})`));
+        console.log(c.bold(runLabel(s.pm, n)) + c.gray(`  (last lines; full log: ${path.relative(s.dir, report.after[n].logFile)})`));
         console.log(report.after[n].tail + '\n');
       }
       await pause();
@@ -367,7 +373,7 @@ async function verifyScreen(s, report) {
       const r = rebuild(s.dir);
       if (r.status !== 0) console.log(c.red(`  ✖ npm rebuild failed:\n${r.stderr.trim().split('\n').slice(-8).join('\n')}`));
       for (const n of broken) {
-        console.log(c.gray(`  running npm run ${n}…`));
+        console.log(c.gray(`  running ${runLabel(s.pm, n)}…`));
         report.after[n] = runScript(s.dir, n, 'after-rebuild');
         console.log(`    ${describeResult(report.after[n])}`);
       }
@@ -381,9 +387,9 @@ async function verifyScreen(s, report) {
 
     // Keep (also when the user just backs out).
     if (auditAll) {
-      const others = s.result.findings.filter((f) => f.tool !== 'npm-audit');
+      const others = s.result.findings.filter((f) => !isDepAudit(f));
       s.result.findings = visibleFindings([...others, ...auditAll], s.cfg);
-      const tool = s.result.tools.find((t) => t.name === 'npm-audit');
+      const tool = s.result.tools.find((t) => DEP_AUDIT_TOOLS.includes(t.name));
       if (tool) tool.count = auditAll.length;
       writeReports(s.dir, s.result);
     } else {
@@ -395,8 +401,9 @@ async function verifyScreen(s, report) {
     console.log('Next steps:');
     console.log('  1. Review the changes:  git diff');
     console.log('  2. If a package needs a build step:  npm rebuild');
-    console.log('  3. Commit on this branch:  git add package.json package-lock.json && git commit -m "Fix vulnerable dependencies"');
-    console.log(c.gray(`  To throw it all away:  git checkout -- package.json package-lock.json && git checkout ${report.base} && git branch -D ${report.branch}`));
+    const files = `package.json ${lockfileName(s.pm)}`;
+    console.log(`  3. Commit on this branch:  git add ${files} && git commit -m "Fix vulnerable dependencies"`);
+    console.log(c.gray(`  To throw it all away:  git checkout -- ${files} && git checkout ${report.base} && git branch -D ${report.branch}`));
     await pause();
     return;
   }
@@ -424,7 +431,7 @@ Rules. Follow them strictly:
 }
 
 function buildVerifyPrompt(s, report, broken) {
-  const logs = broken.map((n) => `- \`npm run ${n}\`: \`${path.relative(s.dir, report.after[n].logFile)}\``).join('\n');
+  const logs = broken.map((n) => `- \`${runLabel(s.pm, n)}\`: \`${path.relative(s.dir, report.after[n].logFile)}\``).join('\n');
   const changes = report.steps.filter((st) => st.status === 'applied').map((st) => `- ${st.label}`).join('\n');
   return `# Investigate a failing dependency upgrade (started by Gnawky)
 
@@ -433,7 +440,7 @@ Gnawky upgraded dependencies to fix security vulnerabilities, on the git branch 
 Full output of each failing script:
 ${logs}
 
-Changes made (see \`git diff package.json\`):
+Changes made (see \`git diff package.json\`; in yarn projects \`resolutions\` entries count as changes too):
 ${changes}
 
 Find out why it fails: read the logs, identify which upgraded package causes it and what changed in it, and find the code in this project that is affected. Then give 1 to 3 ways to fix it with trade-offs (for example: adapt the code, pick a different version, or undo just that upgrade) and say which one you recommend. Then ask me what I want to do.
@@ -529,7 +536,7 @@ async function settingsScreen(s) {
     const pick = await select(`Settings ${c.gray(`(saved in ${OUT_DIR}/config.json)`)}`, [
       { label: `Minimum severity to show: ${c.bold(s.cfg.minSeverity)}`, value: 'sev' },
       { label: `Offline mode: ${onoff(s.cfg.offline)}  ${c.gray('(nothing leaves this computer)')}`, value: 'offline' },
-      { label: `Scanner npm audit: ${onoff(s.cfg.scanners['npm-audit'])}`, value: 'npm-audit' },
+      { label: `Scanner ${auditName(s.pm)}: ${onoff(s.cfg.scanners['npm-audit'])}`, value: 'npm-audit' },
       { label: `Scanner gitleaks: ${onoff(s.cfg.scanners.gitleaks)}`, value: 'gitleaks' },
       { label: `Scanner semgrep: ${onoff(s.cfg.scanners.semgrep)}`, value: 'semgrep' },
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
@@ -577,9 +584,14 @@ function printProject(p) {
   if (p.auth.length) row('Auth', p.auth.join(', '));
   const extras = [p.docker && 'Docker', p.workflows && `GitHub Actions (${p.workflows} workflow${p.workflows > 1 ? 's' : ''})`].filter(Boolean);
   if (extras.length) row('Also', extras.join(', '));
-  row('Lockfile', p.lockfile === 'npm' ? `${c.green('✔')} package-lock.json`
-    : p.lockfile ? c.yellow(`⚠ ${p.lockfile} lockfile: not supported yet, npm audit needs package-lock.json`)
-      : c.yellow('⚠ none: npm audit needs one (npm install --package-lock-only --ignore-scripts)'));
+  const LOCK_ROWS = {
+    npm: `${c.green('✔')} package-lock.json`,
+    yarn: `${c.green('✔')} yarn.lock ${c.gray('(Yarn 1, checked with yarn audit)')}`,
+    'yarn-berry': c.yellow('⚠ yarn.lock from Yarn 2+: not supported yet, so dependencies are not checked'),
+    pnpm: c.yellow('⚠ pnpm-lock.yaml: not supported yet, so dependencies are not checked'),
+  };
+  row('Lockfile', LOCK_ROWS[p.lockfile]
+    ?? c.yellow('⚠ none: the dependency audit needs one (npm install --package-lock-only --ignore-scripts, or yarn install)'));
   row('Git', p.git ? `${c.green('✔')} repository` : c.yellow('⚠ not a git repository: automatic fixes need one (git init)'));
   for (const e of p.envFiles) {
     row('Secrets', e.ignored === false
@@ -593,7 +605,7 @@ function recommendTools(p) {
   const envNote = p.envFiles.length ? ` You have ${p.envFiles.map((e) => e.file).join(', ')}.` : '';
   const stack = [p.typescript ? 'TypeScript' : 'JavaScript', ...p.frameworks].join(' / ');
   return [
-    { t: tool('npm'), level: 'required', reason: `Checks your ${p.depCount} dependencies for known vulnerabilities.` },
+    { t: tool(p.lockfile === 'yarn' ? 'yarn' : 'npm'), level: 'required', reason: `Checks your ${p.depCount} dependencies for known vulnerabilities.` },
     { t: tool('git'), level: 'recommended', reason: 'Lets Gnawky make fixes on a separate branch you can throw away.' },
     { t: tool('gitleaks'), level: 'recommended', reason: `Finds API keys, passwords and tokens in your files and git history.${envNote}` },
     { t: tool('semgrep'), level: 'recommended', reason: `Finds risky code (injection, XSS, unsafe eval) with rules for ${stack}.` },
@@ -697,7 +709,7 @@ async function doctorScreen(s) {
     console.log(c.bold('Installed tools\n'));
     console.log(`  ${c.green('✔')} ${'node'.padEnd(9)} ${process.version}`);
     const missing = [];
-    for (const t of TOOLS) {
+    for (const t of TOOLS.filter((x) => !x.onlyFor || x.onlyFor === s.pm)) {
       const version = toolVersion(t.cmd);
       if (version) {
         console.log(`  ${c.green('✔')} ${t.cmd.padEnd(9)} ${version}  ${c.gray(t.why)}`);
@@ -707,8 +719,8 @@ async function doctorScreen(s) {
         console.log(`    ${c.gray('install:')} ${installCommand(t) ? installCommand(t).flat().join(' ') : t.hint}`);
       }
     }
-    const lock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(s.dir, f)));
-    if (!lock) console.log(c.yellow('\n  ⚠ No package-lock.json: npm audit needs one (npm install --package-lock-only --ignore-scripts).'));
+    if (!s.pm) console.log(c.yellow('\n  ⚠ No lockfile: the dependency audit needs one (npm install --package-lock-only --ignore-scripts, or yarn install).'));
+    else if (!['npm', 'yarn'].includes(s.pm)) console.log(c.yellow(`\n  ⚠ ${s.pm === 'pnpm' ? 'pnpm' : 'Yarn 2+'} lockfiles are not supported yet, so dependencies are not checked.`));
     console.log();
     const installable = missing.filter((t) => installCommand(t));
     const pick = await select('Install a missing tool?', [
@@ -731,7 +743,9 @@ const SCREENS = {
 // ------------------------------------------------------------------ main loop
 
 export async function startApp(dir) {
-  const s = { dir, cfg: loadConfig(dir), result: loadLastScan(dir), pkg: readPkg(dir), stale: false };
+  const s = {
+    dir, cfg: loadConfig(dir), result: loadLastScan(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
+  };
   try {
     if (!s.pkg) {
       header(s);
