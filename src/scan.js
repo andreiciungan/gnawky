@@ -3,6 +3,7 @@ import path from 'node:path';
 import { runAllScanners } from './scanners.js';
 import { loadIgnores, rank } from './finding.js';
 import { renderMarkdown } from './report.js';
+import { renderHtml } from './html-report.js';
 import { OUT_DIR, ensureOutDir } from './config.js';
 
 export function performScan(dir, cfg, log = () => {}) {
@@ -43,6 +44,7 @@ export function writeReports(dir, result) {
   const out = ensureOutDir(dir);
   fs.writeFileSync(path.join(out, 'findings.json'), JSON.stringify(result, null, 2) + '\n');
   fs.writeFileSync(path.join(out, 'security-report.md'), renderMarkdown(result) + '\n');
+  fs.writeFileSync(path.join(out, 'security-report.html'), renderHtml(result));
   return out;
 }
 
@@ -55,3 +57,4 @@ export function loadLastScan(dir) {
 }
 
 export const reportFile = (dir) => path.join(dir, OUT_DIR, 'security-report.md');
+export const htmlReportFile = (dir) => path.join(dir, OUT_DIR, 'security-report.html');

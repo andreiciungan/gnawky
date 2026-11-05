@@ -8,7 +8,7 @@ import {
 import { detectProject, semgrepRulesFor } from './detect.js';
 import { TOOLS, tool, toolVersion, installCommand, installTool } from './tools.js';
 import {
-  performScan, loadLastScan, writeReports, reportFile, filterFindings, visibleFindings,
+  performScan, loadLastScan, writeReports, reportFile, htmlReportFile, filterFindings, visibleFindings,
 } from './scan.js';
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
@@ -560,9 +560,29 @@ async function reportScreen(s) {
   } catch {
     console.log('No report yet. Run a scan first.');
   }
-  console.log(c.gray(`Saved at ${file} (also findings.json next to it).`));
-  console.log(c.gray('It lists your weak spots: keep it private, don\'t upload it anywhere public.'));
-  await pause();
+  const html = htmlReportFile(s.dir);
+  console.log(c.gray(`Saved at ${file} (also security-report.html and findings.json next to it).`));
+  console.log(c.gray('It lists your weak spots: keep it private, don\'t upload it anywhere public.\n'));
+  // Scans from before the HTML report existed: build it from the saved results.
+  if (!fs.existsSync(html) && s.result) writeReports(s.dir, s.result);
+  if (!fs.existsSync(html)) return pause();
+  const pick = await select('Report', [
+    { label: 'Open HTML report in browser', value: 'open' },
+    { label: 'Back', value: 'back' },
+  ]);
+  if (pick === 'open' && !openInBrowser(html)) await pause();
+}
+
+function openInBrowser(file) {
+  const [cmd, args] =
+    process.platform === 'darwin' ? ['open', [file]]
+    : IS_WIN ? ['explorer', [file]]
+    : ['xdg-open', [file]];
+  const r = spawnSync(cmd, args, { stdio: 'ignore' });
+  // explorer.exe exits with 1 even on success, so only a launch error counts there.
+  if (!r.error && (IS_WIN || !r.status)) return true;
+  console.log(c.yellow(`Could not open a browser. Open this file yourself: ${file}`));
+  return false;
 }
 
 async function settingsScreen(s) {
