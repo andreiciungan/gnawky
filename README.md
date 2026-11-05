@@ -1,6 +1,11 @@
-# Gnawky
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img src="assets/logo-light.png" alt="Gnawky: gnaws through your code, watches like a hawk" width="560">
+  </picture>
+</p>
 
-*Gnaws through your code, watches like a hawk.*
+# Gnawky
 
 Gnawky is a local security scanner for Node.js projects. It combines proven open-source scanners, writes one report, and lets you choose per finding: **fix**, **ignore (with a reason)**, or **skip**. It also ships as a Claude Code plugin that explains findings and proposes fixes.
 

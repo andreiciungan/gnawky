@@ -6,6 +6,8 @@ const wrap = (code) => (s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : String(s)
 export const c = {
   bold: wrap('1'), dim: wrap('2'), red: wrap('31'), green: wrap('32'), yellow: wrap('33'),
   blue: wrap('34'), cyan: wrap('36'), gray: wrap('90'), inverse: wrap('7'),
+  // Brand purple (256-color 141, #af87ff), matching the logo.
+  accent: wrap('38;5;141'),
 };
 
 const SEV_COLOR = { critical: (s) => c.bold(c.red(s)), high: c.red, medium: c.yellow, low: c.blue, info: c.gray };
@@ -44,7 +46,7 @@ export function ticker(label, stream = process.stdout) {
   const draw = () => {
     const clock = elapsed();
     const line = truncate(`  ${frames[i++ % frames.length]} ${label}…`, width() - clock.length - 1);
-    stream.write(`\r\x1b[2K${c.cyan(line)} ${c.gray(clock)}`);
+    stream.write(`\r\x1b[2K${c.accent(line)} ${c.gray(clock)}`);
   };
   draw();
   const timer = setInterval(draw, 250);
@@ -119,8 +121,8 @@ export function select(title, options, { initial = null, keys = {}, hint = '' } 
         const num = (numbered ? (Number.isInteger(o.number) ? `${o.number}.` : '') : i < 9 ? `${i + 1}.` : '').padStart(numWidth);
         let label = truncate(`${num} ${o.label}`, cols());
         if (o.disabled) label = c.gray(label.replace(ANSI, ''));
-        else if (i === idx) label = c.cyan(label);
-        lines.push(`${i === idx ? c.cyan('❯') : ' '} ${label}`);
+        else if (i === idx) label = c.accent(label);
+        lines.push(`${i === idx ? c.accent('❯') : ' '} ${label}`);
       }
       if (start + size < n) lines.push(c.gray('    ↓ more'));
       lines.push(c.gray(`↑/↓ move · Enter select · ${numbered ? 'type a number to jump' : '1-9 jump'}${hint ? ` · ${hint}` : ''} · q/Esc back`));
@@ -189,7 +191,7 @@ const LETTERS = {
 };
 const LOGO_ROWS = [0, 1, 2, 3, 4].map((i) => [...'GNAWKY'].map((ch) => LETTERS[ch][i]).join(' '));
 const LOGO_WIDTH = Math.max(...LOGO_ROWS.map((r) => r.length));
-const GRADIENT = [51, 45, 39, 33, 27]; // cyan to blue (256-color palette)
+const GRADIENT = [183, 177, 141, 135, 99]; // light lavender to purple (256-color palette), matching the logo
 export const TAGLINE = 'gnaws through your code · watches like a hawk';
 
 const center = (s, width) => ' '.repeat(Math.max(0, Math.floor((width - visibleLen(s)) / 2))) + s;
@@ -199,7 +201,7 @@ export function printLogo() {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
   if (cols < LOGO_WIDTH + 4 || rows < 30) {
-    console.log(`${c.bold(c.cyan('GNAWKY'))}  ${c.gray(TAGLINE)}\n`);
+    console.log(`${c.bold(c.accent('GNAWKY'))}  ${c.gray(TAGLINE)}\n`);
     return;
   }
   const width = Math.min(cols, 80);
