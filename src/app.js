@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { c, clear, ask, confirm, pause, select, sevTag, printLogo } from './ui.js';
@@ -12,8 +13,11 @@ import {
 } from './scan.js';
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
-  loadTriage, runTriage, triageItems, batchCount, triageOrder, VERDICTS, URGENCIES,
+  loadTriage, runTriage, triageItems, batchCount, triageOrder, secretDenyRules, VERDICTS, URGENCIES,
 } from './triage.js';
+import {
+  AUDIT_TOOL, PLUGIN_DIR, latestAudit, auditCounts, nextAuditRun, recordAuditRun, buildAuditTask, scanAudit,
+} from './audit.js';
 import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
   planSteps, regressions, undoFix,
@@ -84,6 +88,13 @@ function printFinding(f, t) {
   row('Suggested fix', f.fix.detail);
   row('More info', f.url);
   row('ID', c.gray(f.fingerprint));
+  if (f.audit) {
+    row('Audit', `verified by the full audit${f.audit.confidence ? `, ${f.audit.confidence} confidence` : ''}${f.audit.likelihood ? ` (likelihood ${f.audit.likelihood}, impact ${f.audit.impact})` : ''}`);
+    row('Attacker', f.audit.attacker);
+    if (f.audit.conditions.length) row('Conditions', f.audit.conditions.join('; '));
+    if (f.audit.trace.length) row('Trace', f.audit.trace.map((x) => `${x.kind} ${x.file}:${x.line}`).join(' → '));
+    row('Full report', c.gray(f.audit.runDir));
+  }
   if (t) row("Claude's take", `${triageTag(t)} ${VERDICTS[t.verdict]}. ${t.reason} ${c.gray('(a suggestion; check it)')}`);
   console.log();
 }
@@ -505,45 +516,57 @@ async function claudeScreen(s, f) {
 }
 
 /** Starts Claude Code in the project with a task file, after a privacy notice. */
-async function launchClaude(s, task) {
+async function launchClaude(s, task, { args = [], notice = null, onStart = null } = {}) {
   header(s);
   if (s.cfg.offline) {
     console.log(c.yellow('Offline mode is on. Asking Claude sends data to Anthropic, so it is turned off.'));
     console.log(c.gray('You can change this in Settings.'));
     await pause();
-    return;
+    return false;
   }
   if (!isAvailable('claude')) {
     console.log('Claude Code is not installed.\n');
     console.log(`  Install it with:  ${c.cyan('npm install -g @anthropic-ai/claude-code')}`);
     console.log('  then choose this option again.');
     await pause();
-    return;
+    return false;
   }
   console.log(c.bold('Before you continue: privacy\n'));
-  console.log('  • This starts Claude Code in this folder.');
-  console.log(`  • Claude will read the files Gnawky prepared in ${OUT_DIR}/ (scan results have secret values`);
-  console.log('    removed; test logs are not filtered) and may read the source files it needs.');
-  console.log('    Anything Claude reads is sent to Anthropic.');
-  console.log('  • Claude is told not to open .env files, keys, or files flagged as containing secrets.');
-  console.log(c.gray('    That is an instruction, not a hard block. For a hard block, add deny rules'));
-  console.log(c.gray('    in Claude Code\'s permission settings.'));
-  console.log('  • Claude asks before changing any file.\n');
-  if (!(await confirm('Continue?'))) return;
+  if (notice) {
+    for (const line of notice) console.log(line);
+    console.log();
+  } else {
+    console.log('  • This starts Claude Code in this folder.');
+    console.log(`  • Claude will read the files Gnawky prepared in ${OUT_DIR}/ (scan results have secret values`);
+    console.log('    removed; test logs are not filtered) and may read the source files it needs.');
+    console.log('    Anything Claude reads is sent to Anthropic.');
+    console.log('  • Claude is told not to open .env files, keys, or files flagged as containing secrets.');
+    console.log(c.gray('    That is an instruction, not a hard block. For a hard block, add deny rules'));
+    console.log(c.gray('    in Claude Code\'s permission settings.'));
+    console.log('  • Claude asks before changing any file.\n');
+  }
+  if (!(await confirm('Continue?'))) return false;
 
   ensureOutDir(s.dir);
   fs.writeFileSync(path.join(s.dir, OUT_DIR, 'claude-task.md'), task);
   // A constant prompt is passed, never scanner data, so it is safe even when Windows needs a shell.
   const prompt = `Read ${OUT_DIR}/claude-task.md and follow the instructions in it.`;
   clear();
-  spawnSync(IS_WIN ? 'claude.cmd' : 'claude', [IS_WIN ? `"${prompt}"` : prompt], {
+  const quote = (a) => (IS_WIN ? `"${a}"` : a);
+  onStart?.();
+  // The prompt goes first: options like --disallowedTools take several values and would swallow it.
+  spawnSync(IS_WIN ? 'claude.cmd' : 'claude', [prompt, ...args].map(quote), {
     cwd: s.dir, stdio: 'inherit', shell: IS_WIN,
   });
   s.stale = true; // Claude may have changed files
+  return true;
 }
 
+// Full-audit findings were already verified by the skill, so they are not triaged again.
+const triageable = (s) => s.result.findings.filter((f) => f.tool !== AUDIT_TOOL);
+
 function triaged(s) {
-  const all = s.result?.findings ?? [];
+  const all = s.result ? triageable(s) : [];
   const done = all.filter((f) => s.triage.entries[f.fingerprint]).length;
   return done ? c.gray(`  (${done} of ${all.length} done)`) : '';
 }
@@ -562,7 +585,7 @@ async function triageScreen(s) {
     return;
   }
 
-  const all = s.result.findings;
+  const all = triageable(s);
   const fresh = all.filter((f) => !s.triage.entries[f.fingerprint]);
   console.log(c.bold('Claude triage\n'));
   console.log('  Claude reads your code and decides, for each finding, whether it is a real issue');
@@ -612,7 +635,7 @@ async function triageScreen(s) {
 async function triageResults(s, summary) {
   for (;;) {
     header(s);
-    const all = s.result.findings;
+    const all = triageable(s);
     const done = all.filter((f) => s.triage.entries[f.fingerprint]);
     const count = (fn) => done.filter((f) => fn(s.triage.entries[f.fingerprint])).length;
     const now = triageOrder(all, s.triage).filter((f) => {
@@ -650,6 +673,86 @@ async function triageResults(s, summary) {
     if (pick === 'view') await viewScreen(s);
     if (pick === 'html' && !openInBrowser(htmlReportFile(s.dir))) await pause();
   }
+}
+
+/** Re-imports the latest audit into the current results without a full rescan. */
+function refreshAudit(s) {
+  if (!s.result) return;
+  const res = scanAudit(s.dir);
+  const imported = filterFindings(s.dir, s.cfg, res.findings ?? []);
+  s.result.findings = visibleFindings([...s.result.findings.filter((f) => f.tool !== AUDIT_TOOL), ...imported], s.cfg);
+  s.result.tools = [
+    ...s.result.tools.filter((t) => t.name !== AUDIT_TOOL),
+    res.findings ? { name: AUDIT_TOOL, status: 'ran', count: res.findings.length } : { name: AUDIT_TOOL, status: 'skipped', message: res.skipped },
+  ];
+  writeReports(s.dir, s.result);
+  s.browse = null;
+}
+
+async function auditScreen(s) {
+  for (;;) {
+    header(s);
+    const audit = latestAudit(s.dir);
+    console.log(c.bold('Full security audit') + c.gray('  (security-audit skill by Cloudflare, MIT, bundled with Gnawky)\n'));
+    console.log('  Claude audits the whole codebase for what scanners miss: broken access control,');
+    console.log('  injection, data leaking between users, unsafe auth flows. Every candidate is checked');
+    console.log('  by a separate verifier; only confirmed findings are imported into Gnawky.\n');
+    if (audit) {
+      const n = auditCounts(audit);
+      const status = audit.status === 'complete' ? c.green('complete')
+        : audit.status === 'incomplete' ? c.yellow(`incomplete${audit.incompleteReason ? ` (${audit.incompleteReason})` : ''}`)
+        : c.yellow(audit.status);
+      console.log(`  Last audit: ${fmtDate(audit.started)}  ·  ${status}${audit.sourceRef ? c.gray(`  ·  commit ${String(audit.sourceRef).slice(0, 8)}`) : ''}`);
+      console.log(`  ${c.bold(`${n.confirmed} confirmed`)} (imported)  ·  ${n.needsValidation} need validation  ·  ${n.rejected} rejected`);
+      console.log(c.gray(`  Reports: ${audit.runDir}\n`));
+    } else {
+      console.log(c.gray('  No audit yet.\n'));
+    }
+    const pick = await select('What do you want to do?', [
+      { label: audit ? 'Start a new audit' : 'Start the audit', value: 'start' },
+      { label: 'Open the audit report (REPORT.md)', value: 'report', disabled: !audit?.report },
+      { label: 'Import the latest results again', value: 'import', disabled: !audit },
+      { label: 'Back', value: null },
+    ]);
+    if (!pick) return;
+    if (pick === 'report' && !openInBrowser(audit.report)) await pause();
+    if (pick === 'import') {
+      refreshAudit(s);
+      console.log(c.green(`\n✔ Imported. ${s.result.findings.filter((f) => f.tool === AUDIT_TOOL).length} audit finding(s) in the list.`));
+      await pause();
+    }
+    if (pick === 'start') await startAudit(s);
+  }
+}
+
+async function startAudit(s) {
+  if (!s.result) {
+    header(s);
+    console.log(c.yellow('Run a scan first: the audit uses the scan results as leads.'));
+    await pause();
+    return;
+  }
+  const dir = nextAuditRun(s.dir);
+  const shown = dir.startsWith(os.homedir()) ? path.join('~', path.relative(os.homedir(), dir)) : dir;
+  const secretFiles = [...new Set(s.result.findings.filter((f) => f.tool === 'gitleaks').map((f) => f.file).filter(Boolean))];
+  const notice = [
+    '  • This starts Claude Code in this folder with the security-audit skill.',
+    '  • Claude reads the whole codebase. Anything Claude reads is sent to Anthropic.',
+    `  • ${c.bold('It takes a while and uses a lot of tokens')}: on a real project often 30 minutes or more,`,
+    '    with many sub-agents, on your Claude plan or API credits. Claude may ask about scope first.',
+    `  • Reports are written outside the project, to ${shown}.`,
+    '    Claude is told not to change project files, and asks before tool use as usual.',
+    '  • Reading .env files, keys, .npmrc and files flagged as containing secrets is blocked.',
+    '  • When it is done, type /exit in Claude to come back; Gnawky imports the confirmed findings.',
+  ];
+  const launched = await launchClaude(s, buildAuditTask(s, dir), {
+    args: ['--plugin-dir', PLUGIN_DIR, '--disallowedTools', secretDenyRules(s.dir, secretFiles).join(',')],
+    notice,
+    onStart: () => recordAuditRun(s.dir, dir),
+  });
+  if (!launched) return;
+  refreshAudit(s);
+  s.stale = false; // the audit doesn't change project files
 }
 
 async function ignoredScreen(s) {
@@ -913,7 +1016,7 @@ async function doctorScreen(s) {
 }
 
 const SCREENS = {
-  scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), claude: (s) => claudeScreen(s, null), triage: triageScreen,
+  scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), claude: (s) => claudeScreen(s, null), triage: triageScreen, audit: auditScreen,
   ignored: ignoredScreen, report: reportScreen, settings: settingsScreen, doctor: doctorScreen,
 };
 
@@ -940,6 +1043,7 @@ export async function startApp(dir) {
         { label: `Review & fix findings${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
         { label: 'Browse findings', value: 'view', disabled: !s.result },
         { label: `Ask Claude to triage all findings${triaged(s)}`, value: 'triage', disabled: !n },
+        { label: 'Run a full security audit with Claude', value: 'audit', disabled: !s.result },
         { label: 'Ask Claude for help', value: 'claude', disabled: !s.result },
         { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
         { label: 'View report', value: 'report', disabled: !s.result },

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { makeFinding } from './finding.js';
 import { packageManager } from './pm.js';
 import { scanYarnAudit } from './yarn.js';
+import { scanAudit, AUDIT_TOOL } from './audit.js';
 
 export const IS_WIN = process.platform === 'win32';
 // Tools installed as .cmd shims on Windows (need a shell there; only pass constant/validated args).
@@ -240,6 +241,8 @@ export function runAllScanners(dir, log = () => {}, opts = {}) {
         ? scanSemgrep(dir, local)
         : { skipped: 'offline mode (set a local rules file in Settings)' };
     }],
+    // Not a scanner run: imports the latest full audit's confirmed findings from disk.
+    [AUDIT_TOOL, () => scanAudit(dir)],
   ];
 
   const findings = [];

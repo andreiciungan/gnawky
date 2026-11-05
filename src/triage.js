@@ -40,6 +40,8 @@ function saveTriage(dir, triage) {
 /** Claude's urgency as a sort key: fix now first, untriaged last, then by severity. */
 export function triageOrder(findings, triage) {
   const key = (f) => {
+    // Full-audit findings were already verified independently: ranked by their own severity.
+    if (f.tool === 'claude-audit') return rank(f.severity) <= 1 ? 0 : rank(f.severity) === 2 ? 1 : 2;
     const t = triage.entries[f.fingerprint];
     if (!t) return URGENCY_ORDER.length + 1;
     return t.verdict === 'false-positive' ? URGENCY_ORDER.length : URGENCY_ORDER.indexOf(t.urgency);
@@ -145,7 +147,7 @@ function projectRoot(dir) {
   return /^[\w./@+\- ]+$/.test(real) ? real : null;
 }
 
-/** Permission deny rules for credentials files and the files gitleaks flagged. */
+/** Permission deny rules for credentials files and the files gitleaks flagged (also used by the full audit). */
 export function secretDenyRules(dir, secretFiles) {
   const deny = ['Read(**/.env*)', 'Read(**/*.pem)', 'Read(**/*.key)', 'Read(**/id_rsa*)', 'Read(**/id_ed25519*)', 'Read(**/.npmrc)'];
   const root = projectRoot(dir);

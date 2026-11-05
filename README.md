@@ -11,6 +11,7 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 | `npm audit` / `yarn audit` | Known-vulnerable dependencies (`package-lock.json` or a Yarn 1 `yarn.lock`) | Yes (npm comes with Node; yarn projects need `yarn`) |
 | [gitleaks](https://github.com/gitleaks/gitleaks) | Secrets in files and git history | Optional, recommended |
 | [semgrep](https://semgrep.dev) | Risky code (injection, XSS, unsafe `eval`, etc.) | Optional, recommended |
+| Full audit (Claude + Cloudflare's security-audit skill) | Vulnerabilities in your own logic that pattern scanners miss | Optional, started from the menu |
 
 Missing optional scanners are reported as "skipped", never silently ignored.
 
@@ -62,6 +63,7 @@ What would you like to do?
 - **Verified fixes**: before applying dependency fixes, you can have Gnawky run your `test`, `build`, `lint` and `typecheck` scripts before and after the change (all at once, or one package at a time with automatic undo of any upgrade that breaks them). It also checks `npm ls` (or `yarn check --verify-tree`) for broken dependency trees, warns about packages that don't support your Node version, and compares the audit before and after. Then you keep the branch, undo everything, or ask Claude to investigate a failure.
 - **Browse findings**: open any finding for details and act on just that one.
 - **Ask Claude to triage all findings**: Claude reads your code (read-only: it can't edit files or run commands) and labels each finding as a real issue, likely false positive, or needs a human, with an urgency (fix now, fix soon, low priority) and a short reason. Advisories are grouped per package, so each package is checked once. Results are saved in `.gnawky/triage.json`, kept across re-scans, shown in Browse and Review & fix, and added to both reports. You can then review in Claude's order. They are suggestions: nothing is fixed or ignored automatically. `.env` files, keys and `.npmrc` are blocked; for files gitleaks flagged, Claude reads a temporary copy with the flagged lines hidden, and Gnawky re-scans each copy with gitleaks first and keeps the file blocked if anything is still found. Needs Claude Code; disabled in offline mode; not on Windows yet.
+- **Run a full security audit with Claude**: starts Claude Code with the bundled [security-audit skill](https://github.com/cloudflare/security-audit-skill) by Cloudflare, which audits the whole codebase for what scanners miss (broken access control, injection, data leaking between users, unsafe auth flows) and has a separate verifier check every candidate. It is long (often 30+ minutes on a real project) and uses a lot of tokens. Reports go outside the project, to `~/security-audit-skill/<project>-<id>/run-N/` (`REPORT.md`, `findings.json`, `NEEDS-VALIDATION.md`). When you exit Claude, Gnawky imports the confirmed findings as a fourth source, `claude-audit`, also on every later scan, with severity, trace, conditions and the fix strategy; reproduction payloads stay in the skill's own report. Credentials files and files flagged for secrets are blocked for the session.
 - **Ask Claude for help**: starts Claude Code with the scan results, after a privacy notice (needs Claude Code; disabled in offline mode).
 - **View report**: shows the Markdown report and opens the HTML report in your browser.
 - **Ignored findings**: see every ignore decision with its reason, and restore any of them.
@@ -109,6 +111,7 @@ The repo is also a plugin (`.claude-plugin/plugin.json`) with:
 
 - `/security-scan`: runs the scanner, explains each finding, recommends fixes, and asks before changing anything
 - `security-reviewer` agent: read-only triage of true vs. false positives, drafts minimal fix diffs
+- `security-audit` skill (`gnawky:security-audit`): Cloudflare's multi-phase audit skill, bundled unmodified under its MIT license. See `skills/security-audit/VENDORED.md` for the source commit and how to update it. Gnawky loads it with `--plugin-dir`, so the menu item works without installing the plugin.
 
 Install it locally through the included `marketplace.json`:
 
