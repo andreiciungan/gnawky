@@ -3,15 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeFinding } from './finding.js';
+import { packageManager } from './pm.js';
+import { scanYarnAudit } from './yarn.js';
 
 export const IS_WIN = process.platform === 'win32';
 // Tools installed as .cmd shims on Windows (need a shell there; only pass constant/validated args).
-const SHELL_SHIMS = new Set(['npm', 'claude']);
+const SHELL_SHIMS = new Set(['npm', 'yarn', 'claude']);
 
 /**
  * Run an external tool. Arguments are passed as an array (no shell), so
  * nothing from the scanned project can be interpreted as a command.
- * Exception: on Windows, npm and claude are .cmd shims that Node can only start
+ * Exception: on Windows, npm, yarn and claude are .cmd shims that Node can only start
  * via a shell; callers must only pass constant or validated args to them.
  */
 export function run(cmd, args, { cwd, timeoutMs = 10 * 60 * 1000, env = {} } = {}) {
@@ -83,7 +85,7 @@ function npmFix(fixAvailable, direct) {
 
 export function scanNpmAudit(dir) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(dir, f)));
-  if (!hasLock) return { skipped: 'no package-lock.json (create one with: npm install --package-lock-only --ignore-scripts)' };
+  if (!hasLock) return { skipped: 'no lockfile (create one with: npm install --package-lock-only --ignore-scripts, or yarn install)' };
 
   const r = run('npm', ['audit', '--json'], { cwd: dir });
   let data;
@@ -118,6 +120,21 @@ export function scanNpmAudit(dir) {
     }
   }
   return { findings };
+}
+
+/**
+ * Dependency audit for the project's package manager: npm audit for package-lock.json,
+ * yarn audit for a Yarn 1 yarn.lock. Returns `name` so reports show which one ran.
+ */
+export function scanDependencies(dir) {
+  const pm = packageManager(dir);
+  if (pm === 'yarn') {
+    if (!isAvailable('yarn')) return { name: 'yarn-audit', skipped: 'yarn not installed (npm install -g yarn)' };
+    return { name: 'yarn-audit', ...scanYarnAudit(dir) };
+  }
+  if (pm === 'yarn-berry') return { skipped: 'Yarn 2+ (Berry) lockfiles are not supported yet' };
+  if (pm === 'pnpm') return { skipped: 'pnpm lockfiles are not supported yet' };
+  return scanNpmAudit(dir);
 }
 
 // ----------------------------------------------------------------- gitleaks
@@ -212,8 +229,8 @@ export function runAllScanners(dir, log = () => {}, opts = {}) {
 
   const scanners = [
     ['npm-audit', () => (offline
-      ? { skipped: 'offline mode (npm audit needs the npm registry)' }
-      : scanNpmAudit(dir))],
+      ? { skipped: 'offline mode (the dependency audit needs the npm registry)' }
+      : scanDependencies(dir))],
     ['gitleaks', () => scanGitleaks(dir)],
     ['semgrep', () => {
       if (!offline) return scanSemgrep(dir, semgrepConfigs);
@@ -235,9 +252,9 @@ export function runAllScanners(dir, log = () => {}, opts = {}) {
     const res = fn();
     if (res.findings) {
       findings.push(...res.findings);
-      tools.push({ name, status: 'ran', count: res.findings.length });
+      tools.push({ name: res.name ?? name, status: 'ran', count: res.findings.length });
     } else {
-      tools.push({ name, status: res.skipped ? 'skipped' : 'error', message: res.skipped ?? res.error });
+      tools.push({ name: res.name ?? name, status: res.skipped ? 'skipped' : 'error', message: res.skipped ?? res.error });
     }
   }
   return { findings, tools };

@@ -2,22 +2,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './scanners.js';
 import { addIgnores } from './finding.js';
+import { PKG_NAME, PKG_VERSION, packageManager, runLabel } from './pm.js';
+import { applyYarnStep } from './yarn.js';
 import {
-  hasNodeModules, installLocked, syncInstall, npmLsProblems, engineWarnings, runScripts,
+  hasNodeModules, installLocked, syncInstall, treeProblems, engineWarnings, runScripts,
 } from './verify.js';
 
-const PKG_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
-const PKG_VERSION = /^[0-9A-Za-z.+-]+$/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]*)?$/;
 const OWN_FILES = ['.gnawky/', '.gnawky-ignore.json'];
-const DEP_FILES = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json'];
+const DEP_FILES = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock'];
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
-const UPGRADE_TYPES = ['npm-upgrade', 'npm-major-upgrade'];
+// Fix types that change one package; the step kind decides how it is applied.
+const STEP_KIND = {
+  'npm-upgrade': 'upgrade',
+  'npm-major-upgrade': 'upgrade',
+  'yarn-upgrade': 'upgrade',
+  'yarn-major-upgrade': 'upgrade',
+  'yarn-refresh': 'refresh',
+  'yarn-resolution': 'resolution',
+  'yarn-major-resolution': 'resolution',
+};
 
 const git = (dir, args) => run('git', args, { cwd: dir });
 const tail = (s, n = 8) => s.trim().split('\n').slice(-n).join('\n');
 
-export const isAutoFixable = (f) => f.fix?.type === 'npm-audit-fix' || UPGRADE_TYPES.includes(f.fix?.type);
+export const isAutoFixable = (f) => f.fix?.type === 'npm-audit-fix' || Boolean(STEP_KIND[f.fix?.type]);
 
 export const emptyPlan = () => ({ auditFix: [], upgrades: [], ignores: [] });
 export const planSize = (p) => p.auditFix.length + p.upgrades.length + p.ignores.length;
@@ -25,7 +34,7 @@ export const hasDependencyChanges = (p) => p.auditFix.length + p.upgrades.length
 
 export function addFixToPlan(plan, f) {
   if (f.fix.type === 'npm-audit-fix') plan.auditFix.push(f);
-  else if (UPGRADE_TYPES.includes(f.fix.type)) plan.upgrades.push(f);
+  else if (STEP_KIND[f.fix.type]) plan.upgrades.push(f);
 }
 
 /** One step per package (plus one for npm audit fix), so each can be tested and undone on its own. */
@@ -37,18 +46,28 @@ export function planSteps(plan) {
   const byPkg = new Map();
   for (const f of plan.upgrades) {
     const step = byPkg.get(f.fix.package) ?? {
-      kind: 'upgrade',
+      kind: STEP_KIND[f.fix.type],
       id: f.fix.package,
       package: f.fix.package,
       version: f.fix.version,
-      major: f.fix.type === 'npm-major-upgrade',
+      fix: f.fix,
+      major: f.fix.type.includes('major'),
       findings: [],
     };
     step.findings.push(f);
     byPkg.set(f.fix.package, step);
   }
-  for (const s of byPkg.values()) steps.push({ ...s, label: `upgrade ${s.package} → ${s.version}` });
+  // Upgrades first: they often fix what a refresh or an override would otherwise force.
+  const ORDER = { upgrade: 0, refresh: 1, resolution: 2 };
+  const pkgSteps = [...byPkg.values()].sort((a, b) => ORDER[a.kind] - ORDER[b.kind]);
+  for (const s of pkgSteps) steps.push({ ...s, label: stepLabel(s) });
   return steps;
+}
+
+function stepLabel(s) {
+  if (s.kind === 'refresh') return `update ${s.package} within its allowed ranges (→ ${s.version} or later)`;
+  if (s.kind === 'resolution') return `force ${s.package} → ^${s.version} (package.json "resolutions")`;
+  return `upgrade ${s.package} → ${s.fix.spec ?? s.version}`;
 }
 
 export function describePlan(plan) {
@@ -103,6 +122,7 @@ function restoreDepFiles(dir, snap) {
 // --ignore-scripts: third-party install scripts never run during a fix.
 // --force is never used: it can silently install breaking major versions.
 function applyStep(dir, step) {
+  if (packageManager(dir) === 'yarn') return applyYarnStep(dir, step);
   let args;
   if (step.kind === 'audit-fix') {
     args = ['audit', 'fix', '--ignore-scripts', '--no-fund'];
@@ -139,18 +159,20 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
   Object.assign(report, { branch, base });
   log(`→ Created branch ${branch} (from ${base})`);
 
+  const pm = packageManager(dir);
+  const installCmd = pm === 'yarn' ? 'yarn install --frozen-lockfile' : 'npm ci';
   let scripts = [...opts.scripts];
   if (scripts.length && !hasNodeModules(dir)) {
-    log('→ npm ci --ignore-scripts  (installs your current dependencies so your scripts can run)');
+    log(`→ ${installCmd} --ignore-scripts  (installs your current dependencies so your scripts can run)`);
     const r = installLocked(dir);
     if (r.status !== 0) {
-      report.scriptsSkipped = 'could not install the current dependencies (npm ci failed).';
+      report.scriptsSkipped = `could not install the current dependencies (${installCmd} failed).`;
       log(`✖ ${report.scriptsSkipped}\n${tail(r.stderr)}`);
       scripts = [];
     }
   }
   report.scripts = scripts;
-  const lsBefore = hasNodeModules(dir) ? npmLsProblems(dir) : null;
+  const lsBefore = hasNodeModules(dir) ? treeProblems(dir) : null;
 
   if (scripts.length) {
     log('\nBefore the fix:');
@@ -171,8 +193,13 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
     if (!r.ok) {
       entry.status = 'failed';
       entry.error = tail(r.output);
-      log(`  ✖ npm failed:\n${entry.error.replace(/^/gm, '    ')}`);
+      log(`  ✖ ${pm} failed:\n${entry.error.replace(/^/gm, '    ')}`);
       restoreDepFiles(dir, snap);
+      continue;
+    }
+    if (r.skipped) {
+      Object.assign(entry, { status: 'skipped', note: r.skipped });
+      log(`  – Skipped: ${r.skipped}`);
       continue;
     }
     if (!guard.length) continue;
@@ -180,7 +207,7 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
     const broken = guard.filter((n) => !results[n].ok);
     if (broken.length) {
       Object.assign(entry, { status: 'reverted', broke: broken, results });
-      log(`  ↩ Undoing this change: it broke ${broken.map((n) => `npm run ${n}`).join(', ')}`);
+      log(`  ↩ Undoing this change: it broke ${broken.map((n) => runLabel(pm, n)).join(', ')}`);
       restoreDepFiles(dir, snap);
       syncInstall(dir);
     }
@@ -192,7 +219,7 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
   }
 
   log('\nChecking dependency compatibility…');
-  const lsAfter = npmLsProblems(dir) ?? [];
+  const lsAfter = treeProblems(dir) ?? [];
   report.lsPreexisting = lsBefore ? lsBefore.length : 0;
   report.lsNew = lsBefore ? lsAfter.filter((p) => !lsBefore.includes(p)) : lsAfter;
   report.engines = engineWarnings(npmOutput);
@@ -230,7 +257,7 @@ export function undoFix(dir, report, log = console.log) {
   git(dir, ['branch', '-D', report.branch]);
   log(`✔ Back on ${report.base}; deleted ${report.branch}.`);
   if (hasNodeModules(dir)) {
-    log('→ npm install --ignore-scripts  (puts node_modules back in sync)');
+    log(`→ ${packageManager(dir) === 'yarn' ? 'yarn' : 'npm'} install --ignore-scripts  (puts node_modules back in sync)`);
     syncInstall(dir);
   }
   return true;

@@ -8,7 +8,7 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 
 | Scanner | Finds | Required? |
 |---|---|---|
-| `npm audit` | Known-vulnerable dependencies | Yes (comes with npm) |
+| `npm audit` / `yarn audit` | Known-vulnerable dependencies (`package-lock.json` or a Yarn 1 `yarn.lock`) | Yes (npm comes with Node; yarn projects need `yarn`) |
 | [gitleaks](https://github.com/gitleaks/gitleaks) | Secrets in files and git history | Optional, recommended |
 | [semgrep](https://semgrep.dev) | Risky code (injection, XSS, unsafe `eval`, etc.) | Optional, recommended |
 
@@ -59,7 +59,7 @@ What would you like to do?
 ```
 
 - **Review & fix**: go through findings one by one and choose fix, skip, or ignore. Nothing happens until you confirm the final plan.
-- **Verified fixes**: before applying dependency fixes, you can have Gnawky run your `test`, `build`, `lint` and `typecheck` scripts before and after the change (all at once, or one package at a time with automatic undo of any upgrade that breaks them). It also checks `npm ls` for broken dependency trees, warns about packages that don't support your Node version, and compares npm audit before and after. Then you keep the branch, undo everything, or ask Claude to investigate a failure.
+- **Verified fixes**: before applying dependency fixes, you can have Gnawky run your `test`, `build`, `lint` and `typecheck` scripts before and after the change (all at once, or one package at a time with automatic undo of any upgrade that breaks them). It also checks `npm ls` (or `yarn check --verify-tree`) for broken dependency trees, warns about packages that don't support your Node version, and compares the audit before and after. Then you keep the branch, undo everything, or ask Claude to investigate a failure.
 - **Browse findings**: open any finding for details and act on just that one.
 - **Ask Claude for help**: starts Claude Code with the scan results, after a privacy notice (needs Claude Code; disabled in offline mode).
 - **Ignored findings**: see every ignore decision with its reason, and restore any of them.
@@ -75,17 +75,27 @@ gnawky --json                       # machine-readable output (used by the Claud
 gnawky --offline                    # nothing leaves this computer
 ```
 
-Requires Node 18+ and a `package-lock.json`.
+Requires Node 18+ and a `package-lock.json` or a Yarn 1 (Classic) `yarn.lock`.
+
+### Yarn projects
+
+Gnawky uses `yarn audit` and works out a fix for each vulnerable package, without extra registry calls:
+
+- **Direct dependency**: the version in `package.json` is raised to the first patched version (exact pins stay exact, `^`/`~` ranges keep their operator), then `yarn install`.
+- **Installed by other packages, patch fits their ranges**: the vulnerable `yarn.lock` entries are re-resolved (the yarn equivalent of `npm audit fix`).
+- **Installed by other packages, pinned to an old version**: a `"resolutions"` override in `package.json`, labeled as risky, and as breaking when it crosses a major version. Gnawky never forces healthy copies of a package onto another major version; in that case it suggests a path-specific resolution instead.
+
+Upgrades run before overrides, and an override is skipped when an earlier upgrade already removed the vulnerable versions. Yarn 2+ (Berry) and pnpm lockfiles are not supported yet.
 
 ## Safety model
 
 - **The scan is read-only.** Nothing changes unless you choose a fix in the app and confirm the plan.
 - **Fixes happen on a new git branch**, and only if your working tree is clean, so you can review with `git diff` and throw everything away in one command.
-- **No install scripts run during fixes** (`--ignore-scripts`), and `npm audit fix --force` is never used. Semver-major upgrades are labeled as breaking and need their own approval. `npm rebuild` is only offered when a check fails, with its own warning.
+- **No install scripts run during fixes** (`--ignore-scripts` for npm and yarn), and `npm audit fix --force` is never used. Semver-major upgrades are labeled as breaking and need their own approval. `npm rebuild` is only offered when a check fails, with its own warning.
 - **Your project's code only runs if you say so.** Verifying a fix runs your package.json scripts, which is opt-in every time and shows the exact commands. It never happens in headless or `--ci` mode.
 - **Secrets are never written to reports.** gitleaks runs with `--redact`, and code snippets are excluded.
 - **No shell.** External tools are launched with argument arrays, so file names or package data can't inject commands. Package specs are validated before `npm install`.
-- **Offline mode** (Settings, or `--offline`): npm audit is skipped (it sends your dependency list to the npm registry), semgrep only uses local rule files, and "Ask Claude" is disabled. Outside offline mode your source code is still never uploaded: only the dependency list goes to the registry, and semgrep downloads its rulesets with metrics turned off.
+- **Offline mode** (Settings, or `--offline`): npm/yarn audit is skipped (it sends your dependency list to the registry), semgrep only uses local rule files, and "Ask Claude" is disabled. Outside offline mode your source code is still never uploaded: only the dependency list goes to the registry, and semgrep downloads its rulesets with metrics turned off.
 - **"Ask Claude" shows a privacy notice first**: anything Claude reads is sent to Anthropic. Claude is told not to open `.env` files, keys, or files flagged as containing secrets; for a hard block, add deny rules in Claude Code's permission settings.
 - **Reports stay out of git**: `.gnawky/` ignores itself. `.gnawky-ignore.json` *is* meant to be committed so your team shares ignore decisions and their reasons.
 
@@ -110,4 +120,4 @@ Check the current Claude Code plugin docs if the commands differ in your version
 - Built-in Node-specific checks (e.g. `helmet` missing in Express, `cookie` without `httpOnly`/`secure`)
 - Apply semgrep autofixes with per-edit approval
 - HTML report and SARIF output for GitHub code scanning
-- Support for yarn and pnpm lockfiles
+- Support for pnpm and Yarn 2+ lockfiles

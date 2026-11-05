@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './scanners.js';
 import { ensureOutDir } from './config.js';
+import { packageManager } from './pm.js';
+import {
+  yarnInstallLocked, yarnSyncInstall, yarnTreeProblems, yarnPackagesWithInstallScripts,
+} from './yarn.js';
+
+const isYarn = (dir) => packageManager(dir) === 'yarn';
 
 // Only these package.json scripts are ever offered, and only after the user
 // confirms: they run the project's own code. The names are constants, so they
@@ -22,11 +28,11 @@ export function detectScripts(dir) {
   return VERIFY_SCRIPTS.filter((n) => typeof scripts[n] === 'string' && !/no test specified/.test(scripts[n]));
 }
 
-/** Runs `npm run <name>`; the full output goes to .gnawky/verify-<phase>-<name>.log. */
+/** Runs `npm run <name>` (or `yarn run`); the full output goes to .gnawky/verify-<phase>-<name>.log. */
 export function runScript(dir, name, phase) {
   if (!VERIFY_SCRIPTS.includes(name)) throw new Error(`not a verify script: ${name}`);
   const started = Date.now();
-  const r = run('npm', ['run', name], { cwd: dir, timeoutMs: SCRIPT_TIMEOUT_MS, env: { CI: 'true' } });
+  const r = run(isYarn(dir) ? 'yarn' : 'npm', ['run', name], { cwd: dir, timeoutMs: SCRIPT_TIMEOUT_MS, env: { CI: 'true' } });
   const output = `${r.stdout}\n${r.stderr}`.trim();
   const logFile = path.join(ensureOutDir(dir), `verify-${phase.replace(/[^A-Za-z0-9.-]/g, '_')}-${name}.log`);
   fs.writeFileSync(logFile, output + '\n');
@@ -44,7 +50,7 @@ export function runScript(dir, name, phase) {
 export function runScripts(dir, names, phase, log = () => {}) {
   const results = {};
   for (const name of names) {
-    log(`  running npm run ${name}…`);
+    log(`  running ${isYarn(dir) ? 'yarn' : 'npm'} run ${name}…`);
     results[name] = runScript(dir, name, phase);
     log(`    ${describeResult(results[name])}`);
   }
@@ -56,16 +62,19 @@ export const describeResult = (r) =>
 
 /** Installs the locked dependencies without running install scripts. */
 export function installLocked(dir) {
+  if (isYarn(dir)) return yarnInstallLocked(dir);
   return run('npm', ['ci', '--ignore-scripts', ...NPM_QUIET], { cwd: dir });
 }
 
 /** Brings node_modules in line with package.json / the lockfile, without install scripts. */
 export function syncInstall(dir) {
+  if (isYarn(dir)) return yarnSyncInstall(dir);
   return run('npm', ['install', '--ignore-scripts', ...NPM_QUIET], { cwd: dir });
 }
 
-/** Dependency tree problems reported by `npm ls` (missing, invalid, unmet peer), without "extraneous". */
-export function npmLsProblems(dir) {
+/** Dependency tree problems: `npm ls` (missing, invalid, unmet peer; without "extraneous") or `yarn check --verify-tree`. */
+export function treeProblems(dir) {
+  if (isYarn(dir)) return yarnTreeProblems(dir);
   const r = run('npm', ['ls', '--all', '--json'], { cwd: dir });
   let data;
   try { data = JSON.parse(r.stdout); } catch { return null; }
@@ -79,11 +88,15 @@ export function engineWarnings(npmOutput) {
   const found = new Map();
   const re = /EBADENGINE\s+package: '([^']+)',\s*\n.*EBADENGINE\s+required: (\{[^}]*\})/g;
   for (const m of npmOutput.matchAll(re)) found.set(m[1], m[2]);
+  // yarn: error|warning pkg@1.2.3: The engine "node" is incompatible with this module. Expected version ">=20".
+  const yarnRe = /(?:error|warning) (\S+): The engine "node" is incompatible with this module\. Expected version "([^"]+)"/g;
+  for (const m of npmOutput.matchAll(yarnRe)) found.set(m[1], `node: ${m[2]}`);
   return [...found].map(([pkg, required]) => `${pkg} requires ${required.replace(/[{}]/g, '').trim()}`);
 }
 
 /** Installed packages that have install scripts (skipped by --ignore-scripts, so they may need `npm rebuild`). */
 export function packagesWithInstallScripts(dir) {
+  if (isYarn(dir)) return yarnPackagesWithInstallScripts(dir);
   const lock = readJson(path.join(dir, 'package-lock.json')) ?? readJson(path.join(dir, 'npm-shrinkwrap.json'));
   return Object.entries(lock?.packages ?? {})
     .filter(([key, p]) => key && p.hasInstallScript)

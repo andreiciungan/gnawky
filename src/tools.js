@@ -7,6 +7,7 @@ import { run, isAvailable, IS_WIN, VERSION_ARGS } from './scanners.js';
  */
 export const TOOLS = [
   { cmd: 'npm', why: 'checks dependencies', hint: 'comes with Node.js' },
+  { cmd: 'yarn', why: 'checks dependencies (yarn projects)', brew: 'yarn', hint: 'npm install -g yarn', onlyFor: 'yarn' },
   { cmd: 'git', why: 'safe fix branches', brew: 'git', hint: 'https://git-scm.com' },
   { cmd: 'gitleaks', why: 'finds leaked secrets', brew: 'gitleaks', hint: 'https://github.com/gitleaks/gitleaks#installing' },
   { cmd: 'semgrep', why: 'finds risky code', brew: 'semgrep', pipx: 'semgrep', hint: 'pipx install semgrep   (https://semgrep.dev/docs/getting-started)' },
