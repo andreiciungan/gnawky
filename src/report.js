@@ -1,8 +1,9 @@
 import { SEVERITY_ORDER } from './finding.js';
+import { VERDICTS, URGENCIES } from './triage.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 
-export function renderMarkdown({ target, date, findings, tools, ignoredCount }) {
+export function renderMarkdown({ target, date, findings, tools, ignoredCount }, triage = { entries: {} }) {
   const out = [];
   out.push('# Security scan report', '');
   out.push(`- **Target:** \`${target}\``, `- **Date:** ${date}`, `- **Suppressed by .gnawky-ignore.json:** ${ignoredCount}`, '');
@@ -35,6 +36,8 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }) 
     if (f.cwe?.length) out.push(`- **CWE:** ${f.cwe.join(', ')}`);
     if (f.description) out.push(`- **Details:** ${f.description}`);
     out.push(`- **Suggested fix (${f.fix.type}):** ${f.fix.detail}`);
+    const t = triage.entries[f.fingerprint];
+    if (t) out.push(`- **Claude's take (suggestion):** ${VERDICTS[t.verdict]}, ${URGENCIES[t.urgency]}. ${t.reason}`);
     if (f.url) out.push(`- **Reference:** ${f.url}`);
     out.push(`- **ID:** \`${f.fingerprint}\``, '');
   }

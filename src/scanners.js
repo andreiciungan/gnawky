@@ -161,6 +161,7 @@ export function scanGitleaks(dir) {
         title: `Possible secret: ${it.Description || it.RuleID}`,
         file: it.File,
         line: it.StartLine,
+        endLine: it.EndLine ?? it.StartLine,
         description: it.Commit
           ? `Found in git history (commit ${it.Commit.slice(0, 8)}). Deleting the file is not enough; the value is still in history.`
           : 'Found in the working tree.',

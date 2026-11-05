@@ -12,6 +12,9 @@ import {
 } from './scan.js';
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
+  loadTriage, runTriage, triageItems, batchCount, triageOrder, VERDICTS, URGENCIES,
+} from './triage.js';
+import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
   planSteps, regressions, undoFix,
 } from './fix.js';
@@ -64,7 +67,14 @@ function header(s, { logo = false } = {}) {
   console.log();
 }
 
-function printFinding(f) {
+function triageTag(t) {
+  if (!t) return '';
+  if (t.verdict === 'false-positive') return c.green('[likely false positive]');
+  const u = { now: (x) => c.bold(c.red(x)), soon: c.yellow, low: c.gray }[t.urgency] ?? c.gray;
+  return u(`[${URGENCIES[t.urgency]}${t.verdict === 'needs-review' ? ', unsure' : ''}]`);
+}
+
+function printFinding(f, t) {
   console.log(`${sevTag(f.severity)} ${c.bold(f.title)}\n`);
   const row = (k, v) => v && console.log(`  ${c.gray(k.padEnd(14))}${v}`);
   row('Location', loc(f));
@@ -74,6 +84,7 @@ function printFinding(f) {
   row('Suggested fix', f.fix.detail);
   row('More info', f.url);
   row('ID', c.gray(f.fingerprint));
+  if (t) row("Claude's take", `${triageTag(t)} ${VERDICTS[t.verdict]}. ${t.reason} ${c.gray('(a suggestion; check it)')}`);
   console.log();
 }
 
@@ -135,7 +146,7 @@ async function viewScreen(s) {
     const items = list.slice(page * size, (page + 1) * size);
 
     const options = items.map((f, i) => ({
-      label: `${sevTag(f.severity)} ${f.title}  ${c.gray(loc(f))}`, value: f, number: page * size + i + 1,
+      label: `${sevTag(f.severity)} ${f.title}  ${triageTag(s.triage.entries[f.fingerprint])} ${c.gray(loc(f))}`.replace(/  +/g, '  '), value: f, number: page * size + i + 1,
     }));
     options.push({ static: '' });
     if (pages > 1) {
@@ -170,7 +181,7 @@ async function viewScreen(s) {
 
 async function detailScreen(s, f) {
   header(s);
-  printFinding(f);
+  printFinding(f, s.triage.entries[f.fingerprint]);
   const auto = isAutoFixable(f);
   const action = await select('What do you want to do?', [
     { label: auto ? 'Fix it automatically' : 'Fix automatically (not available, see suggested fix)', value: 'fix', disabled: !auto },
@@ -194,13 +205,13 @@ async function detailScreen(s, f) {
   }
 }
 
-async function reviewScreen(s) {
+async function reviewScreen(s, { claudeOrder = false } = {}) {
   const plan = emptyPlan();
-  const list = [...s.result.findings];
+  const list = claudeOrder ? triageOrder(s.result.findings, s.triage) : [...s.result.findings];
   for (const [i, f] of list.entries()) {
     header(s);
     console.log(c.gray(`Finding ${i + 1} of ${list.length}   ·   planned so far: ${planSize(plan)} change(s)\n`));
-    printFinding(f);
+    printFinding(f, s.triage.entries[f.fingerprint]);
     const choice = await select('Your decision', [
       { label: 'Fix automatically', value: 'fix', disabled: !isAutoFixable(f) },
       { label: 'Skip for now', value: 'skip' },
@@ -531,6 +542,116 @@ async function launchClaude(s, task) {
   s.stale = true; // Claude may have changed files
 }
 
+function triaged(s) {
+  const all = s.result?.findings ?? [];
+  const done = all.filter((f) => s.triage.entries[f.fingerprint]).length;
+  return done ? c.gray(`  (${done} of ${all.length} done)`) : '';
+}
+
+/** Read-only Claude run that gives every finding a verdict and an urgency. */
+async function triageScreen(s) {
+  header(s);
+  const blocked = s.cfg.offline
+    ? 'Offline mode is on. Triage sends data to Anthropic, so it is turned off (change it in Settings).'
+    : !isAvailable('claude') ? 'Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code'
+    : IS_WIN ? 'Claude triage is not supported on Windows yet. Use "Ask Claude for help" instead.'
+    : null;
+  if (blocked) {
+    console.log(c.yellow(blocked));
+    await pause();
+    return;
+  }
+
+  const all = s.result.findings;
+  const fresh = all.filter((f) => !s.triage.entries[f.fingerprint]);
+  console.log(c.bold('Claude triage\n'));
+  console.log('  Claude reads your code and decides, for each finding, whether it is a real issue');
+  console.log('  for this project and how urgent it is. Its answers are suggestions: nothing is');
+  console.log('  fixed or ignored automatically.\n');
+  console.log(`  ${all.length - fresh.length} of ${all.length} findings already have a verdict.\n`);
+  const scope = await select('What should Claude check?', [
+    { label: `Only findings without a verdict (${fresh.length})`, value: 'new', disabled: !fresh.length },
+    { label: `All findings again (${all.length})`, value: 'all' },
+    { label: 'Show the current results', value: 'show', disabled: fresh.length === all.length },
+    { label: 'Back', value: null },
+  ]);
+  if (!scope) return;
+  if (scope === 'show') return triageResults(s, null);
+
+  const todo = scope === 'new' ? fresh : all;
+  const items = triageItems(todo);
+  const batches = batchCount(items);
+  header(s);
+  console.log(c.bold('Before you continue: privacy and cost\n'));
+  console.log(`  • ${todo.length} finding(s) in ${items.length} item(s) (advisories are grouped per package), in ${batches} Claude run(s).`);
+  console.log('  • Claude gets the scan results (secret values removed) and reads the source files,');
+  console.log('    package.json, the lockfile and node_modules it needs. All of it is sent to Anthropic.');
+  console.log('  • Claude can only read and search files: it cannot edit files or run commands.');
+  console.log('  • Reading .env files, keys and .npmrc is blocked. Files flagged as containing secrets');
+  console.log('    are blocked too; Claude reads a copy with the flagged lines hidden instead.');
+  console.log(c.gray(`  • Expect about a minute per run. It uses your Claude plan or API credits.\n`));
+  if (!(await confirm('Start triage?'))) return;
+
+  console.log();
+  const started = Date.now();
+  let tick = null;
+  const { triage, summary } = await runTriage(s.dir, todo, all, (b, total) => {
+    clearInterval(tick);
+    const t0 = Date.now();
+    const line = () => `  Claude is reviewing batch ${b} of ${total}… ${Math.round((Date.now() - t0) / 1000)}s`;
+    if (b > 1) process.stdout.write('\n');
+    process.stdout.write(line());
+    tick = setInterval(() => process.stdout.write(`\r${line()}`), 1000);
+  }).finally(() => clearInterval(tick));
+  process.stdout.write('\n');
+  s.triage = triage;
+  writeReports(s.dir, s.result);
+  await triageResults(s, { ...summary, seconds: Math.round((Date.now() - started) / 1000) });
+}
+
+async function triageResults(s, summary) {
+  for (;;) {
+    header(s);
+    const all = s.result.findings;
+    const done = all.filter((f) => s.triage.entries[f.fingerprint]);
+    const count = (fn) => done.filter((f) => fn(s.triage.entries[f.fingerprint])).length;
+    const now = triageOrder(all, s.triage).filter((f) => {
+      const t = s.triage.entries[f.fingerprint];
+      return t && t.verdict !== 'false-positive' && t.urgency === 'now';
+    });
+    console.log(c.bold("Claude's triage") + c.gray('  (suggestions: check the reasons before acting)\n'));
+    if (summary) {
+      console.log(`  Checked ${summary.triaged} finding(s) in ${summary.seconds}s${summary.cost ? c.gray(`  ·  ≈ $${summary.cost.toFixed(2)} at API prices`) : ''}`);
+      if (summary.missing) console.log(c.yellow(`  ${summary.missing} finding(s) got no verdict. Run triage again for "findings without a verdict".`));
+      for (const e of summary.errors) console.log(c.red(`  ✖ ${e}`));
+      if (summary.redacted) console.log(c.gray(`  Claude read ${summary.redacted} file(s) flagged for secrets as redacted copies (flagged lines hidden, copies deleted).`));
+      if (summary.blocked) console.log(c.yellow(`  ${summary.blocked} file(s) flagged for secrets stayed blocked (no safe copy), so findings in them may say "needs a human".`));
+      if (summary.denials) console.log(c.gray(`  Claude tried to open ${summary.denials} blocked file(s); the reads were refused.`));
+      console.log();
+    }
+    console.log(`  ${c.bold(c.red(`${now.length} fix now`))}  ·  ${count((t) => t.verdict !== 'false-positive' && t.urgency === 'soon')} fix soon  ·  `
+      + `${count((t) => t.verdict !== 'false-positive' && t.urgency === 'low')} low priority  ·  ${c.green(`${count((t) => t.verdict === 'false-positive')} likely false positive`)}`
+      + `  ·  ${count((t) => t.verdict === 'needs-review')} unsure  ·  ${all.length - done.length} not triaged\n`);
+    for (const f of now.slice(0, 8)) {
+      console.log(`  ${sevTag(f.severity)} ${f.title}`);
+      console.log(c.gray(`      ${s.triage.entries[f.fingerprint].reason}`));
+    }
+    if (now.length > 8) console.log(c.gray(`  …and ${now.length - 8} more`));
+    if (now.length) console.log();
+
+    const pick = await select('Next step', [
+      { label: "Review & fix in Claude's order (fix now first)", value: 'review' },
+      { label: 'Browse findings', value: 'view' },
+      { label: 'Open HTML report in browser', value: 'html' },
+      { label: 'Back to menu', value: null },
+    ]);
+    if (!pick) return;
+    if (pick === 'review') return reviewScreen(s, { claudeOrder: true });
+    if (pick === 'view') await viewScreen(s);
+    if (pick === 'html' && !openInBrowser(htmlReportFile(s.dir))) await pause();
+  }
+}
+
 async function ignoredScreen(s) {
   for (;;) {
     header(s);
@@ -792,7 +913,7 @@ async function doctorScreen(s) {
 }
 
 const SCREENS = {
-  scan: scanScreen, view: viewScreen, review: reviewScreen, claude: (s) => claudeScreen(s, null),
+  scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), claude: (s) => claudeScreen(s, null), triage: triageScreen,
   ignored: ignoredScreen, report: reportScreen, settings: settingsScreen, doctor: doctorScreen,
 };
 
@@ -800,7 +921,7 @@ const SCREENS = {
 
 export async function startApp(dir) {
   const s = {
-    dir, cfg: loadConfig(dir), result: loadLastScan(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
+    dir, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
   };
   try {
     if (!s.pkg) {
@@ -818,6 +939,7 @@ export async function startApp(dir) {
         { label: s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
         { label: `Review & fix findings${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
         { label: 'Browse findings', value: 'view', disabled: !s.result },
+        { label: `Ask Claude to triage all findings${triaged(s)}`, value: 'triage', disabled: !n },
         { label: 'Ask Claude for help', value: 'claude', disabled: !s.result },
         { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
         { label: 'View report', value: 'report', disabled: !s.result },

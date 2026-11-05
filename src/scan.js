@@ -5,6 +5,7 @@ import { loadIgnores, rank } from './finding.js';
 import { renderMarkdown } from './report.js';
 import { renderHtml } from './html-report.js';
 import { OUT_DIR, ensureOutDir } from './config.js';
+import { loadTriage } from './triage.js';
 
 export function performScan(dir, cfg, log = () => {}) {
   const { findings, tools } = runAllScanners(dir, log, {
@@ -43,8 +44,9 @@ export function filterFindings(dir, cfg, findings) {
 export function writeReports(dir, result) {
   const out = ensureOutDir(dir);
   fs.writeFileSync(path.join(out, 'findings.json'), JSON.stringify(result, null, 2) + '\n');
-  fs.writeFileSync(path.join(out, 'security-report.md'), renderMarkdown(result) + '\n');
-  fs.writeFileSync(path.join(out, 'security-report.html'), renderHtml(result));
+  const triage = loadTriage(dir);
+  fs.writeFileSync(path.join(out, 'security-report.md'), renderMarkdown(result, triage) + '\n');
+  fs.writeFileSync(path.join(out, 'security-report.html'), renderHtml(result, triage));
   return out;
 }
 
