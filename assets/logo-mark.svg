@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Gnawky">
+  <title>Gnawky</title>
+  <defs>
+    <linearGradient id="gk-shield" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="0.5" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#4c1d95"/>
+    </linearGradient>
+    <radialGradient id="gk-iris" cx="0.4" cy="0.35" r="0.75">
+      <stop offset="0" stop-color="#fef08a"/>
+      <stop offset="0.55" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#b45309"/>
+    </radialGradient>
+    <!-- The bite: overlapping tooth marks taken out of the shield's top-right corner. -->
+    <mask id="gk-bite">
+      <rect width="256" height="256" fill="#fff"/>
+      <circle cx="212" cy="48" r="24" fill="#000"/>
+      <circle cx="225" cy="80" r="15" fill="#000"/>
+      <circle cx="183" cy="26" r="15" fill="#000"/>
+    </mask>
+    <!-- Almond eye; the iris is clipped to it so the upper lid covers its top (the hawk stare). -->
+    <clipPath id="gk-eye">
+      <path d="M64 140 C92 116 146 106 192 118 C166 158 104 166 64 140 Z"/>
+    </clipPath>
+  </defs>
+
+  <g mask="url(#gk-bite)">
+    <path d="M128 18 L214 50 V122 C214 178 178 218 128 238 C78 218 42 178 42 122 V50 Z" fill="url(#gk-shield)"/>
+    <path d="M128 32 L201 59 V122 C201 170 171 204 128 223 C85 204 55 170 55 122 V59 Z"
+          fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3"/>
+  </g>
+  <!-- Crumbs from the bite. -->
+  <circle cx="238" cy="112" r="5" fill="#7c3aed"/>
+  <circle cx="230" cy="128" r="3" fill="#a78bfa"/>
+
+  <!-- Eye. -->
+  <path d="M64 140 C92 116 146 106 192 118 C166 158 104 166 64 140 Z" fill="#f8fafc"/>
+  <g clip-path="url(#gk-eye)">
+    <circle cx="136" cy="134" r="27" fill="url(#gk-iris)"/>
+    <circle cx="139" cy="134" r="12" fill="#0b1220"/>
+    <circle cx="146" cy="126" r="4.5" fill="#ffffff"/>
+  </g>
+  <!-- Brow ridge: a tapered blade, heaviest over the front of the eye. -->
+  <path d="M52 128 C84 98 146 84 206 102 L198 116 C148 100 96 110 62 138 Z" fill="#0b1220"/>
+</svg>

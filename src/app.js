@@ -60,7 +60,7 @@ function header(s, { logo = false } = {}) {
     printLogo();
     console.log(`${c.bold(name)}  ${c.gray(s.dir)}`);
   } else {
-    console.log(`${c.bold(c.cyan('Gnawky'))}  ${c.bold(name)}  ${c.gray(s.dir)}`);
+    console.log(`${c.bold(c.accent('Gnawky'))}  ${c.bold(name)}  ${c.gray(s.dir)}`);
   }
   const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
   if (s.cfg.offline) bits.push(c.yellow('offline mode'));
@@ -162,8 +162,8 @@ async function viewScreen(s) {
     }));
     options.push({ static: '' });
     if (pages > 1) {
-      const prev = page > 0 ? c.cyan('← Previous page') : c.gray('← Previous page');
-      const next = page < pages - 1 ? c.cyan('Next page →') : c.gray('Next page →');
+      const prev = page > 0 ? c.accent('← Previous page') : c.gray('← Previous page');
+      const next = page < pages - 1 ? c.accent('Next page →') : c.gray('Next page →');
       options.push({ static: `${prev}    ${c.gray('·')}    ${next}` });
     }
     options.push({ label: 'Back', value: null });
@@ -529,7 +529,7 @@ async function launchClaude(s, task, { args = [], notice = null, onStart = null 
   }
   if (!isAvailable('claude')) {
     console.log('Claude Code is not installed.\n');
-    console.log(`  Install it with:  ${c.cyan('npm install -g @anthropic-ai/claude-code')}`);
+    console.log(`  Install it with:  ${c.accent('npm install -g @anthropic-ai/claude-code')}`);
     console.log('  then choose this option again.');
     await pause();
     return false;
@@ -952,7 +952,7 @@ async function setupScreen(s, { firstRun = false } = {}) {
   const recs = recommendTools(p).map((r) => ({ ...r, version: toolVersion(r.t.cmd) }));
   for (const { t, level, reason, version } of recs) {
     const icon = version ? c.green('✔') : level === 'optional' ? c.gray('–') : c.red('✖');
-    const tag = level === 'optional' ? c.gray('optional') : level === 'required' ? c.gray('required') : c.cyan('recommended');
+    const tag = level === 'optional' ? c.gray('optional') : level === 'required' ? c.gray('required') : c.accent('recommended');
     console.log(`  ${icon} ${c.bold(t.cmd.padEnd(9))} ${version ? c.gray(version) : c.yellow('not installed')}  ${tag}`);
     console.log(`      ${c.gray(reason)}`);
   }

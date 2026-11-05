@@ -1,9 +1,23 @@
+import fs from 'node:fs';
 import { SEVERITY_ORDER } from './finding.js';
 import { VERDICTS, URGENCIES } from './triage.js';
 
 // Self-contained HTML report: no external CSS, JS, fonts or images, so it opens
 // offline and viewing it never sends anything anywhere. Every value comes from
 // scanner output (package names, advisory text, file paths), so all of it is escaped.
+
+// The logo is embedded (header banner and tab icon) so the report stays one self-contained file.
+// The banner files are 720px copies of assets/logo-{light,dark}.png, small enough to inline.
+const asset = (name, enc) => {
+  try { return fs.readFileSync(new URL(`../assets/${name}`, import.meta.url), enc); } catch { return null; }
+};
+const MARK = asset('logo-mark.svg', 'utf8');
+const FAVICON = MARK ? `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(MARK)}">` : '';
+const BANNER = { light: asset('report-logo-light.png', 'base64'), dark: asset('report-logo-dark.png', 'base64') };
+const ALT = 'Gnawky: gnaws through your code, watches like a hawk';
+const BRAND = BANNER.light && BANNER.dark
+  ? `<img class="logo logo-light" src="data:image/png;base64,${BANNER.light}" alt="${ALT}" width="360" height="102"><img class="logo logo-dark" src="data:image/png;base64,${BANNER.dark}" alt="${ALT}" width="360" height="102">`
+  : '<div class="brand">gnawky</div>';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
@@ -87,17 +101,21 @@ export function renderHtml({ target, date, findings, tools, ignoredCount, minSev
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Gnawky report: ${esc(project)}</title>
+${FAVICON}
 <style>
-:root{--bg:#f7f7f5;--panel:#fff;--text:#1d1d1b;--muted:#6b6b66;--border:#e3e2dd;--code:#f0efea;--accent:#2f6f4f;
+:root{--bg:#f7f7f5;--panel:#fff;--text:#1d1d1b;--muted:#6b6b66;--border:#e3e2dd;--code:#f0efea;--accent:#6d28d9;
 --critical:#b3261e;--high:#d0541b;--medium:#b58100;--low:#2d6fb3;--info:#6b6b66;--ok:#2f8f4f;}
-@media (prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1f1f1c;--text:#ecebe6;--muted:#9a9990;--border:#34332f;--code:#2a2a26;--accent:#6fbf8f;
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1f1f1c;--text:#ecebe6;--muted:#9a9990;--border:#34332f;--code:#2a2a26;--accent:#a78bfa;
 --critical:#f2665c;--high:#f08a4b;--medium:#e0b23a;--low:#6aa8e8;--info:#9a9990;--ok:#5cc184;}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 main{max-width:980px;margin:0 auto;padding:32px 16px 64px}
 h1{font-size:24px;margin:0 0 4px}h2{font-size:16px;margin:32px 0 12px}
 .muted{color:var(--muted)}code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px;word-break:break-all}
-.brand{font-weight:700;color:var(--accent);letter-spacing:.02em}
+.brand{font-weight:800;font-size:18px;color:var(--accent);margin-bottom:6px}
+.logo{display:block;width:360px;max-width:100%;height:auto;margin:0 0 16px -6px}
+.logo-dark{display:none}
+@media (prefers-color-scheme:dark){.logo-light{display:none}.logo-dark{display:block}}
 .facts{display:flex;flex-wrap:wrap;gap:4px 20px;margin-top:8px;color:var(--muted);font-size:14px}
 .warn{margin:20px 0;padding:12px 14px;border:1px solid var(--critical);border-radius:8px;color:var(--critical)}
 .tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:24px}
@@ -133,12 +151,12 @@ ul.scanners li{padding:8px 14px;border-top:1px solid var(--border)}ul.scanners l
 .empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel);border:1px dashed var(--border);border-radius:10px}
 footer{margin-top:40px;font-size:13px;color:var(--muted)}
 @media (max-width:640px){.tiles{grid-template-columns:repeat(3,1fr)}.claude{flex-direction:column;align-items:stretch}.now-tile{flex:none}.finding dl{grid-template-columns:1fr}.finding dt{padding-top:10px}.finding dd{padding-top:0}}
-@media print{body{background:#fff;color:#000}.controls{display:none}.finding{break-inside:avoid}.finding:not([open]) dl{display:block}}
+@media print{.logo-light{display:block!important}.logo-dark{display:none!important}body{background:#fff;color:#000}.controls{display:none}.finding{break-inside:avoid}.finding:not([open]) dl{display:block}}
 </style>
 </head>
 <body>
 <main>
-<div class="brand">gnawky</div>
+${BRAND}
 <h1>Security report: ${esc(project)}</h1>
 <div class="facts"><span><code>${esc(target)}</code></span><span>${esc(dateText)}</span><span>Minimum severity: ${esc(minSeverity ?? 'n/a')}</span>${offline ? '<span>Offline mode</span>' : ''}<span>Ignored via .gnawky-ignore.json: ${ignoredCount ?? 0}</span></div>
 ${noneRan ? '<div class="warn"><b>Warning:</b> no scanner ran successfully, so an empty result does not mean the project is safe.</div>' : ''}
