@@ -36,6 +36,10 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
     if (f.cwe?.length) out.push(`- **CWE:** ${f.cwe.join(', ')}`);
     if (f.description) out.push(`- **Details:** ${f.description}`);
     out.push(`- **Suggested fix (${f.fix.type}):** ${f.fix.detail}`);
+    if (f.audit) {
+      out.push(`- **Full audit:** verified${f.audit.confidence ? `, ${f.audit.confidence} confidence` : ''}. Details: \`${f.audit.runDir}\``);
+      if (f.audit.trace.length) out.push(`- **Trace:** ${f.audit.trace.map((x) => `${x.kind} \`${x.file}:${x.line}\``).join(' → ')}`);
+    }
     const t = triage.entries[f.fingerprint];
     if (t) out.push(`- **Claude's take (suggestion):** ${VERDICTS[t.verdict]}, ${URGENCIES[t.urgency]}. ${t.reason}`);
     if (f.url) out.push(`- **Reference:** ${f.url}`);

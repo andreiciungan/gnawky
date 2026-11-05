@@ -47,6 +47,11 @@ function findingCard(f, i, triage) {
     f.cwe?.length && ['CWE', f.cwe.map(esc).join(', ')],
     f.description && ['Details', esc(f.description)],
     ['Suggested fix', `${fixBadge(f.fix?.type)} ${esc(f.fix?.detail)}`],
+    f.audit && ['Full audit', `<span class="tri tri-real">verified</span>${f.audit.confidence ? ` ${esc(f.audit.confidence)} confidence` : ''}${f.audit.likelihood ? `, likelihood ${esc(f.audit.likelihood)}, impact ${esc(f.audit.impact)}` : ''}${f.audit.confidenceReason ? `. ${esc(f.audit.confidenceReason)}` : ''}`],
+    f.audit?.attacker && ['Attacker', esc(f.audit.attacker)],
+    f.audit?.conditions.length && ['Conditions', `<ul>${f.audit.conditions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`],
+    f.audit?.trace.length && ['Trace', `<ol class="trace">${f.audit.trace.map((x) => `<li><b>${esc(x.kind)}</b> <code>${esc(x.file)}:${esc(x.line)}</code> ${esc(x.description)}</li>`).join('')}</ol>`],
+    f.audit && ['Full report', `<code>${esc(f.audit.runDir)}</code>`],
     t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
     ['Reference', url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : f.url ? esc(f.url) : null],
     ['ID', `<code>${esc(f.fingerprint)}</code>`],
@@ -124,6 +129,7 @@ ul.scanners li{padding:8px 14px;border-top:1px solid var(--border)}ul.scanners l
 .urg-soon{background:color-mix(in srgb,var(--medium) 20%,transparent);color:var(--medium)}
 .claude{display:flex;gap:14px;align-items:center;margin-top:8px}.claude p{margin:0;color:var(--muted);font-size:14px}
 .now-tile{--c:var(--critical);flex:0 0 190px}
+.finding dd ul,.finding dd ol{margin:0;padding-left:18px}.trace li{margin-bottom:4px}
 .empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel);border:1px dashed var(--border);border-radius:10px}
 footer{margin-top:40px;font-size:13px;color:var(--muted)}
 @media (max-width:640px){.tiles{grid-template-columns:repeat(3,1fr)}.claude{flex-direction:column;align-items:stretch}.now-tile{flex:none}.finding dl{grid-template-columns:1fr}.finding dt{padding-top:10px}.finding dd{padding-top:0}}
