@@ -207,7 +207,7 @@ const PLACEHOLDER = '/* line hidden by Gnawky: possible secret */';
  * moved since the scan); without gitleaks there is no check, so no copies.
  * Returns { original path: copy path } for the copies that passed.
  */
-function prepareRedactedCopies(dir, secretFindings) {
+async function prepareRedactedCopies(dir, secretFindings) {
   const root = path.join(dir, REDACTED_DIR);
   fs.rmSync(root, { recursive: true, force: true });
   if (!secretFindings.length || !isAvailable('gitleaks')) return {};
@@ -237,7 +237,7 @@ function prepareRedactedCopies(dir, secretFindings) {
   }
   if (!Object.keys(copies).length) return {};
 
-  const check = scanGitleaks(root);
+  const check = await scanGitleaks(root);
   if (check.error || check.skipped) {
     fs.rmSync(root, { recursive: true, force: true });
     return {};
@@ -266,7 +266,7 @@ export async function runTriage(dir, findings, allFindings, onProgress = () => {
   const secretFiles = [...new Set(secrets.map((f) => f.file).filter(Boolean))];
   const args = claudeArgs(dir, secretFiles);
   // With only the broad relative rule available, the copies would be blocked as well.
-  const copies = projectRoot(dir) ? prepareRedactedCopies(dir, secrets) : {};
+  const copies = projectRoot(dir) ? await prepareRedactedCopies(dir, secrets) : {};
   try {
     return await triageBatches(dir, items, args, secretFiles, copies, onProgress);
   } finally {

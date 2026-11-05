@@ -7,8 +7,10 @@ import { renderHtml } from './html-report.js';
 import { OUT_DIR, ensureOutDir } from './config.js';
 import { loadTriage } from './triage.js';
 
-export function performScan(dir, cfg, log = () => {}) {
-  const { findings, tools } = runAllScanners(dir, log, {
+export async function performScan(dir, cfg, log = () => {}, { onStep } = {}) {
+  const { findings, tools } = await runAllScanners(dir, log, {
+    onStep,
+    skipTests: cfg.semgrepSkipTests !== false,
     offline: cfg.offline,
     enabled: cfg.scanners,
     semgrepConfigs: cfg.semgrepConfigs,

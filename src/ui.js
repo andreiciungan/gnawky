@@ -18,6 +18,42 @@ export function truncate(s, max) {
   return s.replace(ANSI, '').slice(0, Math.max(1, max - 1)) + '…';
 }
 
+/** 75 → "1m 15s", 9 → "9s". */
+export function fmtDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+/**
+ * A progress line with a running clock, so a slow scanner visibly keeps working:
+ *   ⠼ running semgrep on 2,620 JS/TS file(s) (2 ruleset(s))… 4m 12s
+ * Returns done(text, kind) that replaces it with a final ✔ / – / ✖ line.
+ * Without a terminal (CI, piped output) it prints one line at the start and one at the end.
+ */
+export function ticker(label, stream = process.stdout) {
+  const started = Date.now();
+  const elapsed = () => fmtDuration((Date.now() - started) / 1000);
+  const icon = { ok: c.green('✔'), skip: c.yellow('–'), fail: c.red('✖') };
+  if (!stream.isTTY) {
+    stream.write(`  ${label}…\n`);
+    return (text, kind = 'ok') => stream.write(`  ${kind === 'ok' ? '✔' : kind === 'skip' ? '–' : '✖'} ${text} (${elapsed()})\n`);
+  }
+  const frames = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  let i = 0;
+  const width = () => (stream.columns || 80) - 1;
+  const draw = () => {
+    const clock = elapsed();
+    const line = truncate(`  ${frames[i++ % frames.length]} ${label}…`, width() - clock.length - 1);
+    stream.write(`\r\x1b[2K${c.cyan(line)} ${c.gray(clock)}`);
+  };
+  draw();
+  const timer = setInterval(draw, 250);
+  return (text, kind = 'ok') => {
+    clearInterval(timer);
+    stream.write(`\r\x1b[2K  ${icon[kind] ?? icon.ok} ${text} ${c.gray(`(${elapsed()})`)}\n`);
+  };
+}
+
 export function clear() {
   if (process.stdout.isTTY) process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 }

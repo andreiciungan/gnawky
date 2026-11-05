@@ -9,6 +9,8 @@ export const DEFAULT_CONFIG = {
   offline: false,
   scanners: { 'npm-audit': true, gitleaks: true, semgrep: true },
   semgrepConfigs: ['p/javascript', 'p/nodejsscan'],
+  // Skip __mocks__, __tests__, fixtures, *.spec.* and *.test.* in semgrep (much faster on big projects).
+  semgrepSkipTests: true,
 };
 
 const file = (dir) => path.join(dir, OUT_DIR, 'config.json');

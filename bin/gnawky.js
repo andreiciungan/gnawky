@@ -4,6 +4,7 @@ import path from 'node:path';
 import { SEVERITY_ORDER } from '../src/finding.js';
 import { loadConfig } from '../src/config.js';
 import { performScan, reportFile, htmlReportFile } from '../src/scan.js';
+import { ticker } from '../src/ui.js';
 
 const HELP = `Gnawky - gnaws through your code, watches like a hawk.
 Security scanner for Node.js projects.
@@ -68,7 +69,7 @@ async function main() {
 
   const log = (m) => console.error(m);
   log(`Scanning ${dir}`);
-  const result = performScan(dir, cfg, log);
+  const result = await performScan(dir, cfg, log, { onStep: (label) => ticker(label, process.stderr) });
   for (const t of result.tools) if (t.status !== 'ran') log(`  ${t.name}: ${t.status} (${t.message})`);
 
   if (o.json) {

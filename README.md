@@ -13,7 +13,7 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 | [semgrep](https://semgrep.dev) | Risky code (injection, XSS, unsafe `eval`, etc.) | Optional, recommended |
 | Full audit (Claude + Cloudflare's security-audit skill) | Vulnerabilities in your own logic that pattern scanners miss | Optional, started from the menu |
 
-Missing optional scanners are reported as "skipped", never silently ignored.
+Missing optional scanners are reported as "skipped", never silently ignored. While a scan runs, each scanner shows a live line with a running clock, and the summary lists how long each one took. Semgrep stops after 30 minutes with a clear message instead of hanging.
 
 ```bash
 brew install gitleaks semgrep        # macOS
@@ -67,7 +67,7 @@ What would you like to do?
 - **Ask Claude for help**: starts Claude Code with the scan results, after a privacy notice (needs Claude Code; disabled in offline mode).
 - **View report**: shows the Markdown report and opens the HTML report in your browser.
 - **Ignored findings**: see every ignore decision with its reason, and restore any of them.
-- **Settings**: minimum severity, offline mode, scanners on/off, semgrep rules. Saved per project in `.gnawky/config.json`.
+- **Settings**: minimum severity, offline mode, scanners on/off, semgrep rules, and whether semgrep skips test and mock files (`__mocks__`, `__tests__`, `fixtures`, `test(s)/`, `*.spec.*`, `*.test.*`; on by default, much faster on big projects; gitleaks still scans them for secrets). Saved per project in `.gnawky/config.json`.
 - **Check installed tools**: shows which scanners are missing and installs them (Homebrew/pipx) if you want.
 
 Headless mode for CI and scripts:
