@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OUT_DIR, ensureOutDir } from './config.js';
 import { makeFinding } from './finding.js';
+import { describeKey, PROFILES } from './scope.js';
 
 // Full security audit with the bundled security-audit skill (Cloudflare, MIT; see
 // skills/security-audit/VENDORED.md). Gnawky only starts the session and imports
@@ -49,9 +50,9 @@ export function nextAuditRun(dir) {
 }
 
 /** Records a run folder, so the import knows where to look. */
-export function recordAuditRun(dir, runDir) {
+export function recordAuditRun(dir, runDir, scope = null) {
   const rec = loadRecord(dir);
-  rec.runs.push({ dir: runDir, started: new Date().toISOString() });
+  rec.runs.push({ dir: runDir, started: new Date().toISOString(), ...(scope ? { scope } : {}) });
   ensureOutDir(dir);
   fs.writeFileSync(recordFile(dir), JSON.stringify(rec, null, 2) + '\n');
 }
@@ -74,6 +75,7 @@ export function latestAudit(dir) {
     return {
       runDir: r.dir,
       started: r.started,
+      scope: r.scope ?? null,
       status: meta.run_status ?? 'unknown',
       incompleteReason: meta.incomplete_reason ?? null,
       sourceRef: typeof meta.source_ref === 'string' ? meta.source_ref : meta.source_ref?.commit ?? null,
@@ -136,7 +138,28 @@ export function scanAudit(dir) {
   return { name: AUDIT_TOOL, findings: auditFindings(dir, audit) };
 }
 
-export function buildAuditTask(s, runDir) {
+function scopeSection(scope) {
+  const lines = [
+    '## Scope (I chose it in Gnawky, so do not ask about it)',
+    '',
+    `- Profile: \`${scope.profile}\` (${PROFILES[scope.profile]}). Record it in \`run-metadata.json\`.`,
+  ];
+  if (scope.paths?.length) {
+    lines.push(
+      '- This is a **scoped run**. Audit only these paths and record them as `scope_paths`:',
+      ...scope.paths.map((k) => `  - ${describeKey(k)}`),
+      '  Record everything else as `out_of_scope`, never as `covered`, and present the report as partial coverage. Read code outside these paths only to follow a trace that starts inside them.',
+    );
+  } else {
+    lines.push('- Scope: the whole repository.');
+  }
+  lines.push(scope.budget
+    ? `- Strict budget: at most ${scope.budget} agent invocations across all phases. Record it as \`budget\`. If it can't fund the minimum the skill requires, ask me before launching any agent.`
+    : '- No budget is set (`budget: null`).');
+  return lines.join('\n');
+}
+
+export function buildAuditTask(s, runDir, scope = { profile: 'standard', paths: [], budget: null }) {
   const secretFiles = [...new Set((s.result?.findings ?? []).filter((x) => x.tool === 'gitleaks').map((x) => x.file).filter(Boolean))];
   return `# Full security audit (started by Gnawky)
 
@@ -144,7 +167,7 @@ Use the \`${SKILL_NAME}\` skill in **full audit mode** on this repository (the c
 
 - Output directory: \`${runDir}\`. Gnawky chose it: it is new and outside the repository. Create it and use it; do not pick another one.
 - Gnawky already scanned the dependencies, secrets and common code patterns; the results are in \`${OUT_DIR}/findings.json\`. Use them as leads, but the audit is about finding what scanners miss.
-- Ask me before you start if you need a decision on scope or budget.
+- Do not ask me about scope or profile; they are set below. Ask only if something else blocks you.
 - When the run is finished (complete, or incomplete with the reason recorded), tell me in one line, and remind me to type /exit to return to Gnawky, which imports the results.
 
 Rules. Follow them strictly:
@@ -153,5 +176,7 @@ Rules. Follow them strictly:
 - Never print secret values.
 - Follow the skill's execution-safety rules: if you can't run something inside the sandbox it requires, don't run it.
 - Never run install scripts, \`git commit\`, or \`git push\`.
+
+${scopeSection(scope)}
 `;
 }

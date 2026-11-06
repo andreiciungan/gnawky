@@ -15,6 +15,12 @@ export const sevTag = (sev) => (SEV_COLOR[sev] ?? String)(sev.toUpperCase().padE
 
 const ANSI = /\x1b\[[0-9;]*m/g;
 const visibleLen = (s) => s.replace(ANSI, '').length;
+/** Terminal rows the lines take up, counting lines that wrap. */
+const screenRows = (lines) => {
+  const width = process.stdout.columns || 80;
+  return lines.reduce((n, l) => n + Math.max(1, Math.ceil(visibleLen(l) / width)), 0);
+};
+
 export function truncate(s, max) {
   if (visibleLen(s) <= max) return s;
   return s.replace(ANSI, '').slice(0, Math.max(1, max - 1)) + '…';
@@ -89,8 +95,10 @@ export async function pause() {
  * moves the cursor there and Enter selects, instead of the default 1-9 instant pick.
  * opts.initial: index to start on. opts.keys: { keyName: value } extra shortcuts
  * (e.g. { left: 'prev' }), shown with opts.hint in the help line.
+ * opts.footer: [{ label, value }] shown unnumbered on one line after a blank line
+ * (e.g. Settings · Quit); ↓ from the last option moves into it, ←/→ moves along it.
  */
-export function select(title, options, { initial = null, keys = {}, hint = '' } = {}) {
+export function select(title, options, { initial = null, keys = {}, hint = '', footer = [] } = {}) {
   return new Promise((resolve, reject) => {
     const input = process.stdin;
     const cols = () => (process.stdout.columns || 80) - 4;
@@ -100,6 +108,8 @@ export function select(title, options, { initial = null, keys = {}, hint = '' } 
       ? initial
       : Math.max(0, options.findIndex((o) => !o.disabled));
     let drawn = 0;
+    // idx >= options.length points into the footer.
+    const inFooter = () => idx >= options.length;
     const numbered = options.some((o) => Number.isInteger(o.number));
     // Without explicit numbers every option is numbered 1..n and typing its number picks it.
     const autoNum = (i) => ('static' in options[i] ? null : i + 1);
@@ -131,12 +141,29 @@ export function select(title, options, { initial = null, keys = {}, hint = '' } 
         lines.push(`${i === idx ? c.accent('❯') : ' '} ${label}`);
       }
       if (start + size < n) lines.push(c.gray('    ↓ more'));
-      lines.push(c.gray(`↑/↓ move · Enter select · ${numbered ? 'type a number to jump' : 'type a number to pick'}${hint ? ` · ${hint}` : ''} · q/Esc back`));
+      if (footer.length) {
+        const pad = ' '.repeat(numWidth + 1);
+        const parts = footer.map((f, j) => (idx === options.length + j ? `${c.accent('❯')} ${c.accent(f.label)}` : `  ${f.label}`));
+        lines.push('', truncate(`${pad}${parts.join('    ')}`, cols() + 2));
+      }
+      lines.push(c.gray(truncate(`↑/↓${footer.length ? '/←/→' : ''} move · Enter select · ${numbered ? 'type a number to jump' : 'number to pick'}${hint ? ` · ${hint}` : ''} · q/Esc back`, cols() + 2)));
       process.stdout.write(lines.join('\n') + '\n');
-      drawn = lines.length;
+      drawn = screenRows(lines);
     };
 
+    const lastEnabled = () => {
+      for (let i = options.length - 1; i >= 0; i--) if (!options[i].disabled) return i;
+      return idx;
+    };
     const move = (d) => {
+      if (footer.length && inFooter()) {
+        // ↑ leaves the footer for the last option, ↓ wraps to the top.
+        if (d < 0) idx = lastEnabled();
+        else { idx = -1; move(1); }
+        return;
+      }
+      if (footer.length && d > 0 && idx === lastEnabled()) { idx = options.length; return; }
+      if (footer.length && d < 0 && idx === options.findIndex((o) => !o.disabled)) { idx = options.length; return; }
       let i = idx;
       for (let k = 0; k < options.length; k++) {
         i = (i + d + options.length) % options.length;
@@ -156,8 +183,12 @@ export function select(title, options, { initial = null, keys = {}, hint = '' } 
       if (key.ctrl && (key.name === 'c' || key.name === 'd')) return finish(null, abortError());
       if (key.name === 'up' || key.name === 'k') move(-1);
       else if (key.name === 'down' || key.name === 'j') move(1);
-      else if (key.name === 'return' || key.name === 'enter') return finish(options[idx]?.value ?? null);
+      else if (key.name === 'return' || key.name === 'enter') return finish(inFooter() ? footer[idx - options.length].value : options[idx]?.value ?? null);
       else if (key.name === 'escape' || str === 'q') return finish(null);
+      else if (inFooter() && (key.name === 'left' || key.name === 'right')) {
+        const j = idx - options.length + (key.name === 'left' ? -1 : 1);
+        idx = options.length + ((j + footer.length) % footer.length);
+      }
       else if (key.name && Object.hasOwn(keys, key.name)) return finish(keys[key.name]);
       else if (numbered && /^[0-9]$/.test(str ?? '')) {
         // Digits typed within a second build one number (1, then 2 → 12).
@@ -188,6 +219,90 @@ export function select(title, options, { initial = null, keys = {}, hint = '' } 
         idx = i;
         pickTimer = setTimeout(() => finish(o.value), 700);
       } else return;
+      render();
+    };
+
+    readline.emitKeypressEvents(input);
+    if (input.isTTY) input.setRawMode(true);
+    input.resume();
+    input.on('keypress', onKey);
+    render();
+  });
+}
+
+/**
+ * Checkbox list that can open folders. The caller owns the state through `view`:
+ *   view.title()        heading (re-read on every render, so it can show counts)
+ *   view.items()        [{ label, state: 'on' | 'off' | 'partial', openable }], or { heading } for a
+ *                       row that is only shown (the cursor skips it)
+ *   view.toggle(i)      Space
+ *   view.open(i)        optional, → / l: returns true when it moved into item i
+ *   view.up()           optional, ← / h / Backspace: the index to put the cursor on, or null at the top
+ *   view.cursor         optional; where the cursor starts, and kept up to date
+ * Resolves 'done' on Enter, or null for q / Esc (= back).
+ */
+export function checklist(view) {
+  return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    const cols = () => (process.stdout.columns || 80) - 4;
+    const maxVisible = () => Math.max(5, (process.stdout.rows || 24) - 10);
+    const box = { on: c.green('[x]'), partial: c.yellow('[~]'), off: '[ ]' };
+    let idx = view.cursor ?? 0;
+    let drawn = 0;
+    const selectable = (i) => !('heading' in (view.items()[i] ?? { heading: '' }));
+    const move = (d) => {
+      const n = view.items().length;
+      for (let k = 0, i = idx; k < n; k++) {
+        i = (i + d + n) % n;
+        if (selectable(i)) { idx = i; return; }
+      }
+    };
+    if (!selectable(idx)) move(1);
+
+    const render = () => {
+      if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      const items = view.items();
+      idx = Math.min(idx, Math.max(0, items.length - 1));
+      view.cursor = idx;
+      const lines = view.title().split('\n').map((l) => truncate(l, cols()));
+      const n = items.length;
+      const size = Math.min(n, maxVisible());
+      const start = Math.min(Math.max(0, idx - Math.floor(size / 2)), n - size);
+      if (start > 0) lines.push(c.gray('    ↑ more'));
+      for (let i = start; i < start + size; i++) {
+        const it = items[i];
+        if ('heading' in it) {
+          lines.push(it.heading ? `      ${c.gray(truncate(it.heading, cols() - 6))}` : '');
+          continue;
+        }
+        const label = truncate(`${it.label}${it.openable ? ' ›' : ''}`, cols() - 4);
+        lines.push(`${i === idx ? c.accent('❯') : ' '} ${box[it.state] ?? box.off} ${i === idx ? c.accent(label) : label}`);
+      }
+      if (start + size < n) lines.push(c.gray('    ↓ more'));
+      lines.push(c.gray(truncate(`↑/↓ move · Space toggle${view.open ? ' · → open · ← up' : ''} · Enter done · q/Esc cancel`, cols() + 2)));
+      process.stdout.write(lines.join('\n') + '\n');
+      drawn = screenRows(lines);
+    };
+
+    const finish = (value, err) => {
+      input.removeListener('keypress', onKey);
+      if (input.isTTY) input.setRawMode(false);
+      input.pause();
+      err ? reject(err) : resolve(value);
+    };
+
+    const onKey = (str, key = {}) => {
+      if (key.ctrl && (key.name === 'c' || key.name === 'd')) return finish(null, abortError());
+      if (key.name === 'up' || key.name === 'k') move(-1);
+      else if (key.name === 'down' || key.name === 'j') move(1);
+      else if (key.name === 'space') view.toggle(idx);
+      else if (view.open && (key.name === 'right' || key.name === 'l')) { if (view.open(idx)) idx = 0; }
+      else if (view.up && (key.name === 'left' || key.name === 'h' || key.name === 'backspace')) {
+        const back = view.up();
+        if (back !== null) idx = back;
+      } else if (key.name === 'return' || key.name === 'enter') return finish('done');
+      else if (key.name === 'escape' || str === 'q') return finish(null);
+      else return;
       render();
     };
 

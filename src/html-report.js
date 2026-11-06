@@ -193,7 +193,7 @@ ${tri.length ? `<select id="verdict" aria-label="Filter by Claude's verdict"><op
     document.getElementById('shown').textContent='('+n+(n===cards.length?'':' of '+cards.length)+')';
     document.getElementById('nomatch').hidden=n>0;
   }
-  [].forEach.call(document.querySelectorAll('.tile'),function(b){b.addEventListener('click',function(){
+  [].forEach.call(document.querySelectorAll('.tile[data-sev]'),function(b){b.addEventListener('click',function(){
     var s=b.dataset.sev;if(sevs.has(s))sevs.delete(s);else sevs.add(s);b.setAttribute('aria-pressed',sevs.has(s));apply();
   });});
   q.addEventListener('input',apply);tool.addEventListener('change',apply);
