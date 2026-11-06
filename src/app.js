@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { c, clear, ask, confirm, pause, select, sevTag, printLogo, wordmark, ticker, fmtDuration } from './ui.js';
+import { c, clear, ask, confirm, pause, select, checklist, sevTag, printLogo, wordmark, ticker, fmtDuration } from './ui.js';
 import {
   loadConfig, saveConfig, configExists, ensureOutDir, OUT_DIR, DEFAULT_CONFIG,
 } from './config.js';
@@ -14,6 +14,7 @@ import {
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
   loadTriage, runTriage, triageItems, batchCount, triageOrder, secretDenyRules, VERDICTS, URGENCIES,
+  findingSource, TRIAGE_SOURCES, MAX_PARALLEL,
 } from './triage.js';
 import {
   AUDIT_TOOL, PLUGIN_DIR, latestAudit, auditCounts, nextAuditRun, recordAuditRun, buildAuditTask, scanAudit,
@@ -23,6 +24,9 @@ import {
   planSteps, regressions, undoFix,
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
+import {
+  PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
+} from './scope.js';
 import {
   packageManager, lockfileName, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS,
 } from './pm.js';
@@ -578,6 +582,66 @@ function triaged(s) {
   return done ? c.gray(`  (${done} of ${all.length} done)`) : '';
 }
 
+const SEVERITIES_DESC = ['critical', 'high', 'medium', 'low', 'info'];
+
+/** Rough wall-clock estimate: 1-4 minutes per Claude run, `parallel` runs at once. */
+function triageEstimate(batches, parallel) {
+  const rounds = Math.ceil(batches / Math.max(1, parallel));
+  const [lo, hi] = [rounds, rounds * 4];
+  return hi < 2 ? 'about a minute' : `about ${lo}–${hi} min`;
+}
+
+/** Severity and source checkboxes. Resolves with { severities, sources }, or null. */
+async function chooseTriageFilter(s, pool) {
+  const last = s.cfg.triageFilter ?? {};
+  const severities = SEVERITIES_DESC.filter((v) => pool.some((f) => f.severity === v));
+  const sources = Object.keys(TRIAGE_SOURCES).filter((v) => pool.some((f) => findingSource(f) === v));
+  const keep = (saved, avail, def) => {
+    const picked = Array.isArray(saved) ? saved.filter((v) => avail.includes(v)) : def.filter((v) => avail.includes(v));
+    return new Set(picked.length ? picked : avail);
+  };
+  const sev = keep(last.severities, severities, ['critical', 'high']);
+  const src = keep(last.sources, sources, sources);
+  const rows = [
+    { heading: 'Severity' },
+    ...severities.map((v) => ({ set: sev, value: v })),
+    { heading: '' },
+    { heading: 'Source' },
+    ...sources.map((v) => ({ set: src, value: v })),
+  ];
+  const picked = () => pool.filter((f) => sev.has(f.severity) && src.has(findingSource(f)));
+  const view = {
+    title: () => {
+      const todo = picked();
+      const items = triageItems(todo);
+      const b = batchCount(items);
+      return `${c.bold('What should Claude triage?')}\n`
+        + (todo.length
+          ? c.green(`${todo.length} finding(s) → ${items.length} item(s) → ${b} Claude run(s)`) + c.gray(`  ·  ${triageEstimate(b, 1)} one at a time`)
+          : c.yellow('Nothing selected')) + '\n';
+    },
+    items: () => rows.map((r) => {
+      if ('heading' in r) return r;
+      const inPool = pool.filter((f) => (r.set === sev ? f.severity : findingSource(f)) === r.value);
+      let extra = '';
+      if (r.value === 'dependencies') extra = c.gray(` → ${triageItems(inPool).length} package(s)`);
+      if (r.value === 'secrets') extra = c.gray(` → ${triageItems(inPool).length} file(s)`);
+      return { label: `${r.value.padEnd(14)} ${String(inPool.length).padStart(5)}${extra}`, state: r.set.has(r.value) ? 'on' : 'off' };
+    }),
+    toggle: (i) => {
+      const r = rows[i];
+      if (r.set.has(r.value)) r.set.delete(r.value); else r.set.add(r.value);
+    },
+  };
+  for (;;) {
+    header(s);
+    if ((await checklist(view)) === null) return null;
+    if (picked().length) return { severities: [...sev], sources: [...src] };
+    console.log(c.yellow('\nNothing to triage with this selection. Tick at least one severity and one source.'));
+    await pause();
+  }
+}
+
 /** Read-only Claude run that gives every finding a verdict and an urgency. */
 async function triageScreen(s) {
   header(s);
@@ -608,30 +672,50 @@ async function triageScreen(s) {
   if (!scope) return;
   if (scope === 'show') return triageResults(s, null);
 
-  const todo = scope === 'new' ? fresh : all;
+  const pool = scope === 'new' ? fresh : all;
+  const filter = await chooseTriageFilter(s, pool);
+  if (!filter) return;
+  const todo = pool.filter((f) => filter.severities.includes(f.severity) && filter.sources.includes(findingSource(f)));
   const items = triageItems(todo);
   const batches = batchCount(items);
+
+  header(s);
+  console.log(`${todo.length} finding(s) in ${items.length} item(s), ${batches} Claude run(s) of up to 25 items.\n`);
+  const lastParallel = s.cfg.triageFilter?.parallel ?? 1;
+  const choices = [1, 2, 3].filter((n) => n <= MAX_PARALLEL);
+  const parallel = batches < 2 ? 1 : await select('How many Claude runs at the same time?', [
+    ...choices.map((n) => ({
+      label: `${n} at a time  ${c.gray(`${triageEstimate(batches, n)}${n === 1 ? '' : ', same tokens, heavier on rate limits'}`)}`,
+      value: n,
+      disabled: n > batches,
+    })),
+    { label: 'Back', value: null },
+  ], { initial: Math.max(0, choices.indexOf(Math.min(lastParallel, batches))) });
+  if (!parallel) return;
+  s.cfg.triageFilter = { ...filter, parallel };
+  saveConfig(s.dir, s.cfg);
+
   header(s);
   console.log(c.bold('Before you continue: privacy and cost\n'));
-  console.log(`  • ${todo.length} finding(s) in ${items.length} item(s) (advisories are grouped per package), in ${batches} Claude run(s).`);
+  console.log(`  • ${todo.length} finding(s) in ${items.length} item(s) (advisories grouped per package, secrets per file), in ${batches} Claude run(s)${parallel > 1 ? `, ${parallel} at a time` : ''}.`);
   console.log('  • Claude gets the scan results (secret values removed) and reads the source files,');
   console.log('    package.json, the lockfile and node_modules it needs. All of it is sent to Anthropic.');
   console.log('  • Claude can only read and search files: it cannot edit files or run commands.');
   console.log('  • Reading .env files, keys and .npmrc is blocked. Files flagged as containing secrets');
   console.log('    are blocked too; Claude reads a copy with the flagged lines hidden instead.');
-  console.log(c.gray(`  • Expect about a minute per run. It uses your Claude plan or API credits.\n`));
+  console.log(c.gray(`  • Rough estimate: ${triageEstimate(batches, parallel)}. It uses your Claude plan or API credits.`));
+  console.log(c.gray('    Verdicts are saved after every run, so stopping halfway keeps what is done.\n'));
   if (!(await confirm('Start triage?'))) return;
 
   console.log();
   const started = Date.now();
-  let tick = null;
-  const { triage, summary } = await runTriage(s.dir, todo, all, (b, total) => {
-    clearInterval(tick);
-    const t0 = Date.now();
-    const line = () => `  Claude is reviewing batch ${b} of ${total}… ${Math.round((Date.now() - t0) / 1000)}s`;
-    if (b > 1) process.stdout.write('\n');
-    process.stdout.write(line());
-    tick = setInterval(() => process.stdout.write(`\r${line()}`), 1000);
+  let state = { done: 0, running: 0, total: batches };
+  const line = () => `  Claude is reviewing: ${state.done} of ${state.total} run(s) done${state.running ? `, ${state.running} running` : ''}… ${fmtDuration((Date.now() - started) / 1000)}`;
+  const draw = () => process.stdout.write(`\r\x1b[2K${line()}`);
+  const tick = setInterval(draw, 1000);
+  const { triage, summary } = await runTriage(s.dir, todo, all, {
+    parallel,
+    onProgress: (p) => { state = p; draw(); },
   }).finally(() => clearInterval(tick));
   process.stdout.write('\n');
   s.triage = triage;
@@ -678,7 +762,7 @@ async function triageResults(s, summary) {
     if (!pick) return;
     if (pick === 'review') return reviewScreen(s, { claudeOrder: true });
     if (pick === 'view') await viewScreen(s);
-    if (pick === 'html' && !openInBrowser(htmlReportFile(s.dir))) await pause();
+    if (pick === 'html' && !openHtmlReport(s)) await pause();
   }
 }
 
@@ -710,6 +794,7 @@ async function auditScreen(s) {
         : audit.status === 'incomplete' ? c.yellow(`incomplete${audit.incompleteReason ? ` (${audit.incompleteReason})` : ''}`)
         : c.yellow(audit.status);
       console.log(`  Last audit: ${fmtDate(audit.started)}  ·  ${status}${audit.sourceRef ? c.gray(`  ·  commit ${String(audit.sourceRef).slice(0, 8)}`) : ''}`);
+      if (audit.scope) console.log(`  Scope: ${scopeSummary(audit.scope)}`);
       console.log(`  ${c.bold(`${n.confirmed} confirmed`)} (imported)  ·  ${n.needsValidation} need validation  ·  ${n.rejected} rejected`);
       console.log(c.gray(`  Reports: ${audit.runDir}\n`));
     } else {
@@ -732,6 +817,99 @@ async function auditScreen(s) {
   }
 }
 
+const fmtNum = (n) => n.toLocaleString('en-US');
+
+/** Folder picker for a custom audit. Resolves with the selected keys, or null when cancelled. */
+async function pickFolders(s, tree, initial) {
+  const sel = new Set(initial);
+  const trail = []; // folder paths opened, from the root down
+  const here = () => tree.byPath.get(trail.at(-1) ?? '');
+  const view = {
+    title: () => {
+      const n = selectedCount(tree, sel);
+      const where = trail.length ? `${trail.at(-1)}/` : 'project root';
+      return `${c.bold('Folders to audit')}  ${c.gray(`in ${where}`)}\n`
+        + `${n ? c.green(`${fmtNum(n)} of ${fmtNum(tree.root.total)} files selected`) : c.gray(`nothing selected yet (${fmtNum(tree.root.total)} files)`)}\n`;
+    },
+    items: () => itemsOf(here()).map((it) => {
+      const name = (it.node ? `${it.node.name}/` : trail.length ? '(files directly in this folder)' : '(files in the project root)').padEnd(32);
+      return {
+        label: `${it.node ? name : c.gray(name)} ${c.gray(`${fmtNum(it.count).padStart(6)} file${it.count === 1 ? '' : 's'}`)}`,
+        state: stateOf(sel, it.key),
+        openable: Boolean(it.node?.children.size),
+      };
+    }),
+    toggle: (i) => toggle(sel, tree, itemsOf(here())[i].key),
+    open: (i) => {
+      const it = itemsOf(here())[i];
+      if (!it.node?.children.size) return false;
+      trail.push(it.key);
+      return true;
+    },
+    up: () => {
+      if (!trail.length) return null;
+      const left = trail.pop();
+      return Math.max(0, itemsOf(here()).findIndex((it) => it.key === left));
+    },
+  };
+  for (;;) {
+    header(s);
+    if ((await checklist(view)) === null) return null;
+    if (sel.size) return [...sel].sort();
+    console.log(c.yellow('\nSelect at least one folder (Space), or press q to go back.'));
+    await pause();
+  }
+}
+
+/** Asks how big the audit should be. Resolves with { mode, profile, paths, budget }, or null. */
+async function chooseAuditScope(s) {
+  const last = s.cfg.auditScope ?? {};
+  header(s);
+  const modes = ['quick', 'full', 'custom'];
+  const mode = await select('How big an audit?', [
+    { label: `Quick   ${c.gray('whole project, one pass (quick profile). Cheapest first look.')}`, value: 'quick' },
+    { label: `Full    ${c.gray('whole project, standard profile. Long, many sub-agents.')}`, value: 'full' },
+    { label: `Custom  ${c.gray('choose folders, then quick / standard / deep and a budget')}`, value: 'custom' },
+    { label: 'Back', value: null },
+  ], { initial: Math.max(0, modes.indexOf(last.mode)) });
+  if (!mode) return null;
+  if (mode !== 'custom') return { mode, profile: SCOPE_MODES[mode].profile, paths: [], budget: null };
+
+  header(s);
+  const done = ticker('listing project files');
+  const tree = buildTree(projectFiles(s.dir));
+  done(`${fmtNum(tree.root.total)} project files`);
+  if (!tree.root.total) {
+    console.log(c.yellow('No project files found.'));
+    await pause();
+    return null;
+  }
+  const paths = await pickFolders(s, tree, validKeys(tree, last.paths));
+  if (!paths) return null;
+
+  header(s);
+  console.log(`Folders: ${paths.map(shortKey).join(', ')}  ${c.gray(`(${fmtNum(selectedCount(tree, new Set(paths)))} files)`)}\n`);
+  const profiles = Object.keys(PROFILES);
+  const profile = await select('Which profile?', [
+    ...profiles.map((p) => ({ label: `${p.padEnd(9)} ${c.gray(PROFILES[p])}`, value: p })),
+    { label: 'Back', value: null },
+  ], { initial: Math.max(0, profiles.indexOf(last.profile ?? 'quick')) });
+  if (!profile) return null;
+
+  console.log(c.gray('\nA budget caps the number of sub-agents the audit may start. The skill needs about'));
+  console.log(c.gray('6-8 for the minimum (reconnaissance, coverage checks, one verifier); it stops cleanly'));
+  console.log(c.gray('and marks the run incomplete when the budget runs out.'));
+  let budget = null;
+  for (;;) {
+    const def = last.budget ? ` ${c.gray(`[${last.budget}]`)}` : '';
+    const a = await ask(`Max sub-agents (Enter = ${last.budget ? 'same as last time' : 'no limit'}, 0 = no limit)${def}: `);
+    if (a === '') { budget = last.budget ?? null; break; }
+    if (/^\d+$/.test(a)) { budget = Number(a) || null; break; }
+    console.log(c.yellow('Type a whole number.'));
+  }
+  return { mode, profile, paths, budget };
+}
+
 async function startAudit(s) {
   if (!s.result) {
     header(s);
@@ -739,23 +917,32 @@ async function startAudit(s) {
     await pause();
     return;
   }
+  const scope = await chooseAuditScope(s);
+  if (!scope) return;
+  s.cfg.auditScope = scope;
+  saveConfig(s.dir, s.cfg);
+
   const dir = nextAuditRun(s.dir);
   const shown = dir.startsWith(os.homedir()) ? path.join('~', path.relative(os.homedir(), dir)) : dir;
   const secretFiles = [...new Set(s.result.findings.filter((f) => f.tool === 'gitleaks').map((f) => f.file).filter(Boolean))];
+  const cost = scope.profile === 'quick'
+    ? [`  • ${c.bold('It takes a while and uses tokens')}, with several sub-agents, on your Claude plan or API credits.`]
+    : [`  • ${c.bold('It takes a while and uses a lot of tokens')}: on a real project often 30 minutes or more,`,
+      '    with many sub-agents, on your Claude plan or API credits.'];
   const notice = [
+    `  • Scope: ${c.bold(scopeSummary(scope))}`,
     '  • This starts Claude Code in this folder with the security-audit skill.',
-    '  • Claude reads the whole codebase. Anything Claude reads is sent to Anthropic.',
-    `  • ${c.bold('It takes a while and uses a lot of tokens')}: on a real project often 30 minutes or more,`,
-    '    with many sub-agents, on your Claude plan or API credits. Claude may ask about scope first.',
+    `  • Claude reads the ${scope.paths.length ? 'selected folders (and code they call)' : 'whole codebase'}. Anything Claude reads is sent to Anthropic.`,
+    ...cost,
     `  • Reports are written outside the project, to ${shown}.`,
     '    Claude is told not to change project files, and asks before tool use as usual.',
     '  • Reading .env files, keys, .npmrc and files flagged as containing secrets is blocked.',
     '  • When it is done, type /exit in Claude to come back; Gnawky imports the confirmed findings.',
   ];
-  const launched = await launchClaude(s, buildAuditTask(s, dir), {
+  const launched = await launchClaude(s, buildAuditTask(s, dir, scope), {
     args: ['--plugin-dir', PLUGIN_DIR, '--disallowedTools', secretDenyRules(s.dir, secretFiles).join(',')],
     notice,
-    onStart: () => recordAuditRun(s.dir, dir),
+    onStart: () => recordAuditRun(s.dir, dir, scope),
   });
   if (!launched) return;
   refreshAudit(s);
@@ -794,14 +981,18 @@ async function reportScreen(s) {
   const html = htmlReportFile(s.dir);
   console.log(c.gray(`Saved at ${file} (also security-report.html and findings.json next to it).`));
   console.log(c.gray('It lists your weak spots: keep it private, don\'t upload it anywhere public.\n'));
-  // Scans from before the HTML report existed: build it from the saved results.
-  if (!fs.existsSync(html) && s.result) writeReports(s.dir, s.result);
-  if (!fs.existsSync(html)) return pause();
+  if (!fs.existsSync(html) && !s.result) return pause();
   const pick = await select('Report', [
     { label: 'Open HTML report in browser', value: 'open' },
     { label: 'Back', value: 'back' },
   ]);
-  if (pick === 'open' && !openInBrowser(html)) await pause();
+  if (pick === 'open' && !openHtmlReport(s)) await pause();
+}
+
+/** Rebuilds the HTML report from the current results (so it has the latest page code), then opens it. */
+function openHtmlReport(s) {
+  if (s.result) writeReports(s.dir, s.result);
+  return openInBrowser(htmlReportFile(s.dir));
 }
 
 function openInBrowser(file) {
@@ -1051,18 +1242,20 @@ export async function startApp(dir) {
         { label: s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
         { label: `Review & fix findings${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
         { label: 'Browse findings', value: 'view', disabled: !s.result },
-        { label: `Ask Claude to triage all findings${triaged(s)}`, value: 'triage', disabled: !n },
+        { label: `Ask Claude to triage findings${triaged(s)}`, value: 'triage', disabled: !n },
         { label: 'Run a full security audit with Claude', value: 'audit', disabled: !s.result },
         { label: 'Ask Claude for help', value: 'claude', disabled: !s.result },
         { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
         { label: 'View report', value: 'report', disabled: !s.result },
         { label: 'Settings', value: 'settings' },
+      ];
+      const footer = [
         { label: 'Check installed tools', value: 'doctor' },
         { label: 'Quit', value: 'quit' },
       ];
-      // The menu takes its options plus a title, a help line and the cursor line.
-      header(s, { logo: true, below: options.length + 3 });
-      const choice = await select('What would you like to do?', options);
+      // The menu takes its options plus a title, a blank line, the footer, a help line and the cursor line.
+      header(s, { logo: true, below: options.length + 5 });
+      const choice = await select('What would you like to do?', options, { footer });
       if (choice === null || choice === 'quit') break;
       await SCREENS[choice](s);
     }

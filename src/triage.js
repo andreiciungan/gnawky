@@ -50,33 +50,42 @@ export function triageOrder(findings, triage) {
 }
 
 /**
- * Work items for Claude. Dependency advisories are grouped per package, so each
- * package is investigated once however many advisories it has.
+ * Work items for Claude. Dependency advisories are grouped per package and secrets
+ * per file, so each package or file is investigated once however many findings it has.
  */
 export function triageItems(findings) {
   const items = [];
-  const byPkg = new Map();
-  for (const f of findings) {
-    if (isDepAudit(f) && f.package) {
-      if (!byPkg.has(f.package)) {
-        const item = { kind: 'dependency', package: f.package, findings: [] };
-        byPkg.set(f.package, item);
-        items.push(item);
-      }
-      byPkg.get(f.package).findings.push(f);
-    } else {
-      items.push({ kind: f.tool === 'gitleaks' ? 'secret' : 'code', findings: [f] });
+  const groups = new Map();
+  const group = (key, make, f) => {
+    if (!groups.has(key)) {
+      const item = { ...make, findings: [] };
+      groups.set(key, item);
+      items.push(item);
     }
+    groups.get(key).findings.push(f);
+  };
+  for (const f of findings) {
+    if (isDepAudit(f) && f.package) group(`pkg:${f.package}`, { kind: 'dependency', package: f.package }, f);
+    else if (f.tool === 'gitleaks' && f.file) group(`file:${f.file}`, { kind: 'secret', file: f.file }, f);
+    else items.push({ kind: f.tool === 'gitleaks' ? 'secret' : 'code', findings: [f] });
   }
   return items.map((it, i) => ({ ...it, id: `item-${i + 1}` }));
 }
+
+/** Which kind of finding this is, for choosing what to triage. */
+export const TRIAGE_SOURCES = { dependencies: 'dependencies', code: 'code', secrets: 'secrets' };
+export const findingSource = (f) => (isDepAudit(f) ? 'dependencies' : f.tool === 'gitleaks' ? 'secrets' : 'code');
+
+/** At most this many Claude runs at the same time. */
+export const MAX_PARALLEL = 3;
 
 export function batchCount(items) {
   return Math.ceil(items.length / BATCH_SIZE);
 }
 
 function describeItem(it) {
-  const lines = [`### ${it.id} (${it.kind}${it.package ? `: ${it.package}` : ''})`];
+  const what = it.package ?? (it.file && it.findings.length > 1 ? `${it.file}, ${it.findings.length} flagged lines` : null);
+  const lines = [`### ${it.id} (${it.kind}${what ? `: ${what}` : ''})`];
   for (const f of it.findings) {
     lines.push(`- [${f.severity}] ${f.title}`);
     lines.push(`  - tool/rule: ${f.tool} / ${f.ruleId}`);
@@ -97,7 +106,7 @@ function buildPrompt(items, secretFiles, copies) {
 How to judge each kind:
 - dependency: check package.json and the lockfile to see whether the package is a direct or a transitive dependency, and whether it is only used for development, tests or the build (devDependencies, tooling) or ships in production. Search the project's source (not node_modules) for how it is used, and whether the vulnerable function or feature named in the advisory is reachable, especially with user-controlled input. Reading files in node_modules is fine when you need to see which package pulls it in or how a function is used.
 - code: open the flagged line and enough context to find where the input comes from (request data, env, constants) and where it ends up. Constant or trusted input usually means a false positive; existing validation or escaping lowers the urgency.
-- secret: never open the original flagged file. Judge from the file name, location and rule (and the redacted copy, if there is one). Treat a leaked secret as real unless the path is clearly a test fixture or example. A real leaked secret is always urgency "now": it must be rotated, and removing it from the code is not enough.
+- secret: never open the original flagged file. Judge from the file name, location and rule (and the redacted copy, if there is one). Treat a leaked secret as real unless the path is clearly a test fixture or example. A real leaked secret is always urgency "now": it must be rotated, and removing it from the code is not enough. A secret item can cover several flagged lines of one file; give one verdict for the item. If the lines differ, use the most serious one (real before needs-review before false-positive) and name the real lines in the reason (for example "lines 12 and 40 look like live keys; the rest are placeholders").
 
 Verdict: "real", "false-positive", or "needs-review" (you could not decide from the code).
 Urgency: "now" (exploitable in production, or a leaked secret), "soon" (real but limited: hard to reach, needs unusual conditions, or dev-only with some exposure), "low" (dev-only tooling, unreachable code, or a false positive).
@@ -256,11 +265,12 @@ async function prepareRedactedCopies(dir, secretFindings) {
 }
 
 /**
- * Triage `findings` (all of them, or only the ones without a verdict).
- * `onProgress(batch, total)` is called before each batch. Saves after every
- * batch, so an error halfway keeps the verdicts already received.
+ * Triage `findings` (all of them, or only the ones without a verdict), running up to
+ * `parallel` Claude batches at the same time. `onProgress({ done, running, total })`
+ * is called whenever a batch starts or ends. Saves after every batch, so an error
+ * halfway keeps the verdicts already received.
  */
-export async function runTriage(dir, findings, allFindings, onProgress = () => {}) {
+export async function runTriage(dir, findings, allFindings, { parallel = 1, onProgress = () => {} } = {}) {
   const items = triageItems(findings);
   const secrets = allFindings.filter((f) => f.tool === 'gitleaks');
   const secretFiles = [...new Set(secrets.map((f) => f.file).filter(Boolean))];
@@ -268,25 +278,38 @@ export async function runTriage(dir, findings, allFindings, onProgress = () => {
   // With only the broad relative rule available, the copies would be blocked as well.
   const copies = projectRoot(dir) ? await prepareRedactedCopies(dir, secrets) : {};
   try {
-    return await triageBatches(dir, items, args, secretFiles, copies, onProgress);
+    return await triageBatches(dir, items, args, secretFiles, copies, { parallel, onProgress });
   } finally {
     fs.rmSync(path.join(dir, REDACTED_DIR), { recursive: true, force: true });
   }
 }
 
-async function triageBatches(dir, items, args, secretFiles, copies, onProgress) {
+async function triageBatches(dir, items, args, secretFiles, copies, { parallel, onProgress }) {
   const triage = loadTriage(dir);
   const total = batchCount(items);
   const summary = { triaged: 0, missing: 0, cost: 0, denials: 0, errors: [], redacted: Object.keys(copies).length, blocked: secretFiles.length - Object.keys(copies).length };
+  const progress = { done: 0, running: 0, total };
 
-  for (let b = 0; b < total; b++) {
+  let next = 0;
+  const worker = async () => {
+    while (next < total) {
+      const b = next++;
+      progress.running++;
+      onProgress({ ...progress });
+      await triageBatch(b);
+      progress.running--;
+      progress.done++;
+      onProgress({ ...progress });
+    }
+  };
+  // Results arrive one at a time (a single JS thread), so merging and saving never interleave.
+  const triageBatch = async (b) => {
     const batch = items.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-    onProgress(b + 1, total);
     const r = await runClaude(dir, buildPrompt(batch, secretFiles, copies), args);
     if (r.error) {
       summary.errors.push(`Batch ${b + 1}: ${r.error}`);
       summary.missing += batch.reduce((n, it) => n + it.findings.length, 0);
-      continue;
+      return;
     }
     summary.cost += r.cost;
     summary.denials += r.denials;
@@ -308,6 +331,9 @@ async function triageBatches(dir, items, args, secretFiles, copies, onProgress) 
     }
     triage.updated = date;
     saveTriage(dir, triage);
-  }
+  };
+  const n = Math.max(1, Math.min(MAX_PARALLEL, Number(parallel) || 1, total));
+  await Promise.all(Array.from({ length: n }, worker));
+  summary.errors.sort((a, b) => parseInt(a.slice(6), 10) - parseInt(b.slice(6), 10));
   return { triage, summary };
 }
