@@ -9,6 +9,8 @@
 
 Gnawky is a local security scanner for Node.js projects. It combines proven open-source scanners, writes one report, and lets you choose per finding: **fix**, **ignore (with a reason)**, or **skip**. It also ships as a Claude Code plugin that explains findings and proposes fixes.
 
+**New to Gnawky?** The [presentation](https://claude.ai/artifact/Ds7sRXMiD463KXGZHSf9nc) walks through what it does, how to use it and why, in 14 slides.
+
 ## What it checks
 
 | Scanner | Finds | Required? |
