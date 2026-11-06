@@ -57,7 +57,7 @@ async function main() {
   const interactive = process.stdin.isTTY && process.stdout.isTTY && !o.json && !o.ci && !o.noUi;
   if (interactive) {
     const { startApp } = await import('../src/app.js');
-    await startApp(dir);
+    await startApp(dir, { offline: o.offline });
     return;
   }
 

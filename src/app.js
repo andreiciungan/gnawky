@@ -1052,7 +1052,7 @@ async function settingsScreen(s) {
 
 // ------------------------------------------------------------------ setup
 
-const STEPS = 3;
+const STEPS = 4;
 const stepTitle = (n, title) => console.log(`${c.gray(`Step ${n} of ${STEPS}`)}  ${c.bold(title)}\n`);
 const listOr = (xs, none = c.gray('none detected')) => (xs.length ? xs.join(', ') : none);
 
@@ -1115,14 +1115,39 @@ async function offerInstall(t) {
 }
 
 /** First-run setup: detect the stack, recommend and install tools, pick semgrep rules, first scan. */
+/** Setup step 2: online or offline. Resolves 'online', 'offline', or null (back). */
+async function networkStep(s) {
+  header(s, { logo: true, below: 27 }); // the step's lines plus the menu; the logo hides on short terminals
+  stepTitle(2, 'Network access');
+  console.log('Gnawky runs on this computer. Some checks need the internet:\n');
+  console.log(`  ${c.bold('Online')} ${c.gray('(recommended)')}`);
+  console.log('    • npm/yarn audit sends your dependency list (names and versions)');
+  console.log('      to the npm registry, like npm install does');
+  console.log('    • semgrep downloads its rulesets (metrics off)');
+  console.log('    • AI tools can send code to Anthropic, only when you start them,');
+  console.log('      after a privacy notice');
+  console.log(c.gray('    Your source code is never uploaded by a scan.\n'));
+  console.log(`  ${c.bold('Offline')}`);
+  console.log('    • nothing leaves this computer');
+  console.log('    • only gitleaks (secrets) runs; the dependency audit and semgrep are');
+  console.log('      skipped unless you add a local semgrep rules file');
+  console.log('    • AI tools are turned off\n');
+  const offline = s.cfg.offline || s.flags?.offline;
+  return select('How should Gnawky work in this project?', [
+    { label: 'Online (recommended)', value: 'online' },
+    { label: 'Offline', value: 'offline' },
+  ], { initial: offline ? 1 : 0 });
+}
+
 async function setupScreen(s, { firstRun = false } = {}) {
   header(s, { logo: true });
   console.log(c.bold(firstRun ? 'Welcome to Gnawky!' : 'Setup') + '\n');
   console.log(`Let's set Gnawky up for ${c.bold(s.pkg?.name ?? path.basename(s.dir))}. It takes about a minute:\n`);
   console.log(`  1. Look at your project to see which technologies it uses`);
   console.log(c.gray('     (reads package.json and file names only; nothing leaves this computer)'));
-  console.log('  2. Recommend the scanners that fit it, and install the ones you want');
-  console.log('  3. Run your first security scan');
+  console.log('  2. Choose whether Gnawky may use the internet');
+  console.log('  3. Recommend the scanners that fit it, and install the ones you want');
+  console.log('  4. Run your first security scan');
   console.log(c.gray('\n  Scanning is read-only: nothing in your project changes unless you approve a fix.\n'));
   const start = await select('Ready?', [
     { label: 'Start setup', value: 'start' },
@@ -1141,9 +1166,14 @@ async function setupScreen(s, { firstRun = false } = {}) {
   printProject(p);
   await pause();
 
-  // Step 2: tools
+  // Step 2: network access
+  const network = await networkStep(s);
+  if (network === null) return; // back: nothing saved, setup runs again next time
+  s.cfg.offline = network === 'offline';
+
+  // Step 3: tools
   header(s, { logo: true });
-  stepTitle(2, 'Recommended tools');
+  stepTitle(3, 'Recommended tools');
   const recs = recommendTools(p).map((r) => ({ ...r, version: toolVersion(r.t.cmd) }));
   for (const { t, level, reason, version } of recs) {
     const icon = version ? c.green('✔') : level === 'optional' ? c.gray('–') : c.red('✖');
@@ -1152,6 +1182,15 @@ async function setupScreen(s, { firstRun = false } = {}) {
     console.log(`      ${c.gray(reason)}`);
   }
   console.log();
+  if (s.cfg.offline) {
+    if (recs.some((r) => r.t.cmd === 'semgrep')) {
+      console.log(c.gray('Offline: semgrep needs a local rules file (Settings › Semgrep rules), otherwise it is skipped.'));
+    }
+    if (recs.some((r) => !r.version && r.level !== 'required')) {
+      console.log(c.gray('Offline mode only limits scans. Installing a tool uses the internet once, if you choose to.'));
+    }
+    console.log();
+  }
   const missing = recs.filter((r) => !r.version && r.level !== 'required');
   if (!missing.length) {
     console.log(c.green('All set: every tool is installed.\n'));
@@ -1168,14 +1207,18 @@ async function setupScreen(s, { firstRun = false } = {}) {
     await pause();
   }
 
-  // Step 3: rules and first scan
+  // Step 4: rules and first scan
   s.cfg.semgrepConfigs = semgrepRulesFor(p);
   saveConfig(s.dir, s.cfg);
   header(s, { logo: true });
-  stepTitle(3, 'First scan');
+  stepTitle(4, 'First scan');
   console.log(`Settings saved in ${c.bold(`${OUT_DIR}/config.json`)} ${c.gray('(the folder is ignored by git)')}:`);
   console.log(`  ${c.gray('Semgrep rules'.padEnd(15))}${s.cfg.semgrepConfigs.join(', ')}`);
   console.log(`  ${c.gray('Min. severity'.padEnd(15))}${s.cfg.minSeverity}`);
+  console.log(`  ${c.gray('Network'.padEnd(15))}${s.cfg.offline ? 'offline' : 'online'}`);
+  if (s.cfg.offline) {
+    console.log(c.yellow('\n  Only gitleaks will run. Switch to online in Settings for the dependency audit and code checks.'));
+  }
   console.log(c.gray('  You can change these any time in Settings.\n'));
   const scan = await select('Run your first scan now?', [
     { label: 'Scan now', value: true },
@@ -1282,9 +1325,9 @@ function aiMenu(s) {
 
 // ------------------------------------------------------------------ main loop
 
-export async function startApp(dir) {
+export async function startApp(dir, { offline = false } = {}) {
   const s = {
-    dir, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
+    dir, flags: { offline }, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
   };
   try {
     if (!s.pkg) {
