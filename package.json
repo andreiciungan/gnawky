@@ -2,12 +2,44 @@
   "name": "gnawky",
   "version": "0.1.0",
   "description": "Gnawky: gnaws through your code, watches like a hawk. Local, read-only-by-default security scanner for Node.js projects, with an interactive fix workflow and a Claude Code plugin.",
+  "keywords": [
+    "security",
+    "scanner",
+    "cli",
+    "npm-audit",
+    "yarn-audit",
+    "gitleaks",
+    "semgrep",
+    "secrets",
+    "vulnerabilities",
+    "claude-code"
+  ],
+  "homepage": "https://github.com/andreiciungan/gnawky#readme",
+  "bugs": {
+    "url": "https://github.com/andreiciungan/gnawky/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andreiciungan/gnawky.git"
+  },
+  "author": "Andrei Ciungan",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "gnawky": "bin/gnawky.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "assets/logo-mark.svg",
+    "assets/report-logo-dark.png",
+    "assets/report-logo-light.png",
+    ".claude-plugin/",
+    "agents/",
+    "commands/",
+    "skills/"
+  ],
   "engines": {
     "node": ">=18"
-  },
-  "license": "MIT"
+  }
 }

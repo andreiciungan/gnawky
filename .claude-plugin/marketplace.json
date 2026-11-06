@@ -1,6 +1,6 @@
 {
   "name": "gnawky-marketplace",
-  "owner": { "name": "Your Name" },
+  "owner": { "name": "Andrei Ciungan" },
   "plugins": [
     { "name": "gnawky", "source": "./", "description": "Security scan for Node.js projects with guided fixes." }
   ]
