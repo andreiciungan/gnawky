@@ -27,15 +27,25 @@ brew install gitleaks semgrep        # macOS
 pipx install semgrep                 # alternative for semgrep
 ```
 
-## Usage
+## Install
 
-Install once (inside this folder):
+Gnawky needs Node 18 or newer and has no npm dependencies of its own.
 
 ```bash
-npm link
+npm install -g gnawky      # npm
+yarn global add gnawky     # Yarn 1
+npx gnawky                 # or try it once, without installing
 ```
 
-Then start it **inside the project you want to scan**:
+Gnawky works the same whether you install it with npm or Yarn: it checks which one the scanned project uses.
+
+**Windows:** run Gnawky inside [WSL](https://learn.microsoft.com/windows/wsl/install) (for example Ubuntu) for full support. Natively on Windows the dependency audit and gitleaks should work, but this hasn't been tested yet: semgrep may not be available, the tool installer offers nothing, and Claude triage is turned off.
+
+**From source:** clone this repository and run `npm link` inside it.
+
+## Usage
+
+Start Gnawky **inside the project you want to scan**:
 
 ```bash
 cd ~/code/my-app
@@ -141,3 +151,7 @@ Check the current Claude Code plugin docs if the commands differ in your version
 - Apply semgrep autofixes with per-edit approval
 - HTML report and SARIF output for GitHub code scanning
 - Support for pnpm and Yarn 2+ lockfiles
+
+## License
+
+[MIT](LICENSE) © 2026 Andrei Ciungan. The bundled security-audit skill in `skills/security-audit/` is by Cloudflare and keeps its own [MIT license](skills/security-audit/LICENSE).
