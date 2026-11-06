@@ -21,4 +21,4 @@ Safety rules. Follow them strictly:
 - For leaked secrets, always say the credential must be rotated first; removing it from the code is not enough.
 - Never edit a file until the user has approved that specific change. Show the diff first.
 - Never run `npm audit fix --force`, install scripts, the project's own code or tests, `git commit`, or `git push` unless the user explicitly asks.
-- For dependency fixes, recommend the user run `gnawky` in their terminal and choose "Review & fix findings" (it works on a separate git branch), or propose the exact command and wait for approval.
+- For dependency fixes, recommend the user run `gnawky` in their terminal and choose "Findings" › "Review & fix" (it works on a separate git branch), or propose the exact command and wait for approval.

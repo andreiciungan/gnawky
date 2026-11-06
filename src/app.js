@@ -133,7 +133,7 @@ async function scanScreen(s) {
   }
   if (s.result.tools.every((t) => t.status !== 'ran')) {
     console.log(c.yellow('\n  ⚠ No scanner ran, so "no findings" does NOT mean the project is safe.'));
-    console.log(c.yellow('    Open "Check installed tools" from the menu to see what is missing.'));
+    console.log(c.yellow('    Open "Tools & scanners" from the menu to see what is missing.'));
   }
   console.log(`\n  ${c.bold('Result:')} ${summary(s.result.findings)}\n`);
 
@@ -1217,9 +1217,68 @@ async function doctorScreen(s) {
 }
 
 const SCREENS = {
-  scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), claude: (s) => claudeScreen(s, null), triage: triageScreen, audit: auditScreen,
+  scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), reviewClaude: (s) => reviewScreen(s, { claudeOrder: true }),
+  claude: (s) => claudeScreen(s, null), triage: triageScreen, audit: auditScreen,
   ignored: ignoredScreen, report: reportScreen, settings: settingsScreen, doctor: doctorScreen,
+  findings: findingsMenu, ai: aiMenu,
 };
+
+/**
+ * A submenu that runs the chosen screen and comes back to itself (cursor on the
+ * same item) until q/Esc or "Back". `build` is called on every pass so counts and
+ * disabled states follow what the screens changed.
+ */
+async function submenu(s, build) {
+  let last = null;
+  for (;;) {
+    const { title, note, options } = build();
+    header(s);
+    if (note) console.log(c.yellow(`${note}\n`));
+    const initial = Math.max(0, options.findIndex((o) => o.value === last));
+    const choice = await select(title, options, { initial, footer: [{ label: '← Back', value: 'back' }] });
+    if (choice === null || choice === 'back') return;
+    last = choice;
+    await SCREENS[choice](s);
+  }
+}
+
+function findingsMenu(s) {
+  return submenu(s, () => {
+    const n = s.result?.findings.length ?? 0;
+    const ignored = safeIgnores(s.dir).length;
+    const hasTriage = n > 0 && s.result.findings.some((f) => s.triage.entries[f.fingerprint]);
+    return {
+      title: `Findings (${n} open${ignored ? `, ${ignored} ignored` : ''})`,
+      note: s.result ? null : 'No scan yet. Run a scan from the main menu to see findings.',
+      options: [
+        { label: `Review & fix${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
+        ...(hasTriage ? [{ label: "Review & fix in Claude's order", value: 'reviewClaude' }] : []),
+        { label: 'Browse findings', value: 'view', disabled: !s.result },
+        { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
+      ],
+    };
+  });
+}
+
+function aiMenu(s) {
+  return submenu(s, () => {
+    const n = s.result?.findings.length ?? 0;
+    const blocked = s.cfg.offline ? 'Offline mode is on, so the AI tools are turned off (change it in Settings).'
+      : !isAvailable('claude') ? 'Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code'
+      : null;
+    const note = blocked ?? (!s.result ? 'No scan yet. Run a scan from the main menu first.'
+      : IS_WIN ? 'Triage is not supported on Windows yet.' : null);
+    return {
+      title: 'AI tools (Claude Code)',
+      note,
+      options: [
+        { label: `Triage findings${triaged(s)}`, value: 'triage', disabled: !!blocked || !n || IS_WIN },
+        { label: 'Run a full security audit', value: 'audit', disabled: !!blocked || !s.result },
+        { label: 'Ask Claude for help', value: 'claude', disabled: !!blocked || !s.result },
+      ],
+    };
+  });
+}
 
 // ------------------------------------------------------------------ main loop
 
@@ -1240,19 +1299,13 @@ export async function startApp(dir) {
       const ignored = safeIgnores(dir).length;
       const options = [
         { label: s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
-        { label: `Review & fix findings${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
-        { label: 'Browse findings', value: 'view', disabled: !s.result },
-        { label: `Ask Claude to triage findings${triaged(s)}`, value: 'triage', disabled: !n },
-        { label: 'Run a full security audit with Claude', value: 'audit', disabled: !s.result },
-        { label: 'Ask Claude for help', value: 'claude', disabled: !s.result },
-        { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
+        { label: `Findings${s.result ? ` (${n})` : ''}`, value: 'findings', disabled: !s.result && !ignored },
+        { label: 'AI tools', value: 'ai' },
         { label: 'View report', value: 'report', disabled: !s.result },
         { label: 'Settings', value: 'settings' },
+        { label: 'Tools & scanners', value: 'doctor' },
       ];
-      const footer = [
-        { label: 'Check installed tools', value: 'doctor' },
-        { label: 'Quit', value: 'quit' },
-      ];
+      const footer = [{ label: 'Quit', value: 'quit' }];
       // The menu takes its options plus a title, a blank line, the footer, a help line and the cursor line.
       header(s, { logo: true, below: options.length + 5 });
       const choice = await select('What would you like to do?', options, { footer });
