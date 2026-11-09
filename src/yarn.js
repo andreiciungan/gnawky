@@ -5,6 +5,7 @@ import path from 'node:path';
 import { run, runAsync } from './scanners.js';
 import { makeFinding } from './finding.js';
 import { PKG_NAME, PKG_VERSION } from './pm.js';
+import { writePackageJson, pinSpec } from './overrides.js';
 import {
   valid, compare, satisfies, parseRange, patchedCandidates, isBreaking,
 } from './semver.js';
@@ -176,7 +177,7 @@ function yarnFix(name, advisories, entries, pkg, advised = new Set()) {
     package: name,
     version: target,
     vulnerableRanges,
-    detail: `Force ${name} to ^${target} with a "resolutions" entry in package.json. `
+    detail: `Force ${name} to ${target} with a "resolutions" entry in package.json (you choose ^${target} or exactly ${target}). `
       + `It is outside the range ${via.join(', ') || 'its dependents'} ask${via.length === 1 ? 's' : ''} for`
       + (major ? ', across a major version: this may break them; run your tests.' : '; run your tests.')
       + orderHint,
@@ -243,15 +244,6 @@ export async function scanYarnAudit(dir) {
 
 // ------------------------------------------------------------ apply
 
-function writePackageJson(dir, mutate) {
-  const file = path.join(dir, 'package.json');
-  const text = fs.readFileSync(file, 'utf8');
-  const indent = /^[ \t]+(?=")/m.exec(text)?.[0] ?? '  ';
-  const pkg = JSON.parse(text);
-  mutate(pkg);
-  fs.writeFileSync(file, JSON.stringify(pkg, null, indent) + (text.endsWith('\n') ? '\n' : ''));
-}
-
 /** Applies one plan step with yarn. Install scripts never run. */
 export function applyYarnStep(dir, step) {
   const { fix } = step;
@@ -283,10 +275,11 @@ export function applyYarnStep(dir, step) {
     removeLockEntries(dir, (e) => e.keys.includes(lockKey(fix.package, old)));
   } else if (step.kind === 'resolution') {
     writePackageJson(dir, (pkg) => {
+      const spec = pinSpec(fix.version, step.pin);
       pkg.resolutions ??= {};
       const keys = resolutionKeys(pkg, fix.package);
-      for (const k of keys) pkg.resolutions[k] = `^${fix.version}`;
-      if (!keys.some((k) => k === fix.package || k === `**/${fix.package}`)) pkg.resolutions[`**/${fix.package}`] = `^${fix.version}`;
+      for (const k of keys) pkg.resolutions[k] = spec;
+      if (!keys.some((k) => k === fix.package || k === `**/${fix.package}`)) pkg.resolutions[`**/${fix.package}`] = spec;
     });
   }
   const args = ['install', ...QUIET];

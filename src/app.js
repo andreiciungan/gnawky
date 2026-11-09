@@ -21,9 +21,10 @@ import {
 } from './audit.js';
 import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
-  planSteps, regressions, undoFix,
+  planSteps, regressions, undoFix, isForced,
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
+import { recommendPin, pinSpec } from './overrides.js';
 import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
 } from './scope.js';
@@ -254,7 +255,35 @@ async function reviewScreen(s, { claudeOrder = false } = {}) {
   await confirmAndApply(s, plan);
 }
 
+/**
+ * For each package whose version will be forced ("resolutions"/"overrides"), asks whether to
+ * write a ^range or an exact version, with Gnawky's recommendation first. False if the user backs out.
+ */
+async function choosePins(s, plan) {
+  const field = s.pm === 'yarn' ? 'resolutions' : 'overrides';
+  for (const step of planSteps(plan).filter((st) => isForced(st.kind))) {
+    const { pin, reason } = recommendPin(s.dir, step.package);
+    header(s);
+    const caret = pinSpec(step.version, 'caret');
+    const exact = pinSpec(step.version, 'exact').padEnd(caret.length);
+    console.log(c.bold(`Force ${step.package} to ${step.version} with ${field === 'overrides' ? 'an' : 'a'} "${field}" entry in package.json\n`));
+    console.log(`  ${c.bold(caret)}  ${c.gray(`allows later ${step.version.split('.')[0]}.x releases, so future fixes arrive with your next install.`)}`);
+    console.log(`  ${c.bold(exact)}  ${c.gray('stays on this version until you change it. Pick this if a newer release is broken.')}`);
+    console.log(`\n  ${c.green('Recommended:')} ${pinSpec(step.version, pin)}, because ${reason}\n`);
+    const options = [
+      { label: `${pinSpec(step.version, 'caret')}  (range)`, value: 'caret' },
+      { label: `${pinSpec(step.version, 'exact')}  (exact)`, value: 'exact' },
+    ].map((o) => (o.value === pin ? { ...o, label: `${o.label}  (Recommended)` } : o))
+      .sort((a, b) => (b.value === pin) - (a.value === pin));
+    const choice = await select(`How should ${step.package} be pinned?`, options);
+    if (choice === null) return false;
+    plan.pins[step.package] = choice;
+  }
+  return true;
+}
+
 async function confirmAndApply(s, plan) {
+  if (!(await choosePins(s, plan))) return;
   header(s);
   console.log(c.bold('Here is what will happen:\n'));
   for (const line of describePlan(plan)) console.log(`  • ${line}`);
@@ -509,7 +538,7 @@ Gnawky upgraded dependencies to fix security vulnerabilities, on the git branch 
 Full output of each failing script:
 ${logs}
 
-Changes made (see \`git diff package.json\`; in yarn projects \`resolutions\` entries count as changes too):
+Changes made (see \`git diff package.json\`; \`resolutions\` (yarn) and \`overrides\` (npm) entries count as changes too):
 ${changes}
 
 Find out why it fails: read the logs, identify which upgraded package causes it and what changed in it, and find the code in this project that is affected. Then give 1 to 3 ways to fix it with trade-offs (for example: adapt the code, pick a different version, or undo just that upgrade) and say which one you recommend. Then ask me what I want to do.

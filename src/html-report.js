@@ -34,6 +34,8 @@ const FIX_LABELS = {
   'yarn-refresh': ['automatic', 'lockfile refresh'],
   'yarn-resolution': ['risky', 'resolution override'],
   'yarn-major-resolution': ['breaking', 'major resolution override'],
+  'npm-override': ['risky', 'override'],
+  'npm-major-override': ['breaking', 'major override'],
   'suggested-edit': ['manual', 'suggested edit'],
   manual: ['manual', 'manual'],
 };
