@@ -4,6 +4,7 @@ import { run } from './scanners.js';
 import { addIgnores } from './finding.js';
 import { PKG_NAME, PKG_VERSION, packageManager, runLabel } from './pm.js';
 import { applyYarnStep } from './yarn.js';
+import { applyNpmOverride, pinSpec } from './overrides.js';
 import {
   hasNodeModules, installLocked, syncInstall, treeProblems, engineWarnings, runScripts,
 } from './verify.js';
@@ -21,6 +22,8 @@ const STEP_KIND = {
   'yarn-refresh': 'refresh',
   'yarn-resolution': 'resolution',
   'yarn-major-resolution': 'resolution',
+  'npm-override': 'override',
+  'npm-major-override': 'override',
 };
 
 const git = (dir, args) => run('git', args, { cwd: dir });
@@ -28,7 +31,11 @@ const tail = (s, n = 8) => s.trim().split('\n').slice(-n).join('\n');
 
 export const isAutoFixable = (f) => f.fix?.type === 'npm-audit-fix' || Boolean(STEP_KIND[f.fix?.type]);
 
-export const emptyPlan = () => ({ auditFix: [], upgrades: [], ignores: [] });
+// pins: package -> 'caret' | 'exact', how a forced version ("resolutions"/"overrides") is written.
+export const emptyPlan = () => ({ auditFix: [], upgrades: [], ignores: [], pins: {} });
+
+/** Fix kinds that force a version onto packages installed by other packages. */
+export const isForced = (kind) => kind === 'resolution' || kind === 'override';
 export const planSize = (p) => p.auditFix.length + p.upgrades.length + p.ignores.length;
 export const hasDependencyChanges = (p) => p.auditFix.length + p.upgrades.length > 0;
 
@@ -52,13 +59,14 @@ export function planSteps(plan) {
       version: f.fix.version,
       fix: f.fix,
       major: f.fix.type.includes('major'),
+      pin: plan.pins?.[f.fix.package] ?? 'caret',
       findings: [],
     };
     step.findings.push(f);
     byPkg.set(f.fix.package, step);
   }
   // Upgrades first: they often fix what a refresh or an override would otherwise force.
-  const ORDER = { upgrade: 0, refresh: 1, resolution: 2 };
+  const ORDER = { upgrade: 0, refresh: 1, resolution: 2, override: 2 };
   const pkgSteps = [...byPkg.values()].sort((a, b) => ORDER[a.kind] - ORDER[b.kind]);
   for (const s of pkgSteps) steps.push({ ...s, label: stepLabel(s) });
   return steps;
@@ -66,7 +74,8 @@ export function planSteps(plan) {
 
 function stepLabel(s) {
   if (s.kind === 'refresh') return `update ${s.package} within its allowed ranges (→ ${s.version} or later)`;
-  if (s.kind === 'resolution') return `force ${s.package} → ^${s.version} (package.json "resolutions")`;
+  if (s.kind === 'resolution') return `force ${s.package} → ${pinSpec(s.version, s.pin)} (package.json "resolutions")`;
+  if (s.kind === 'override') return `force ${s.package} → ${pinSpec(s.version, s.pin)} (package.json "overrides")`;
   return `upgrade ${s.package} → ${s.fix.spec ?? s.version}`;
 }
 
@@ -123,6 +132,7 @@ function restoreDepFiles(dir, snap) {
 // --force is never used: it can silently install breaking major versions.
 function applyStep(dir, step) {
   if (packageManager(dir) === 'yarn') return applyYarnStep(dir, step);
+  if (step.kind === 'override') return applyNpmOverride(dir, step);
   let args;
   if (step.kind === 'audit-fix') {
     args = ['audit', 'fix', '--ignore-scripts', '--no-fund'];

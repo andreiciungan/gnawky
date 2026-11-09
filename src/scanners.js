@@ -6,6 +6,7 @@ import { makeFinding } from './finding.js';
 import { packageManager, auditName } from './pm.js';
 import { scanYarnAudit } from './yarn.js';
 import { scanAudit, AUDIT_TOOL } from './audit.js';
+import { npmOverrideFixes } from './overrides.js';
 
 export const IS_WIN = process.platform === 'win32';
 // Tools installed as .cmd shims on Windows (need a shell there; only pass constant/validated args).
@@ -139,12 +140,21 @@ export async function scanNpmAudit(dir) {
   if (data.error) return { error: data.error.summary ?? 'npm audit failed' };
 
   const direct = directDeps(dir);
+  const vulns = Object.entries(data.vulnerabilities ?? {});
+  // Entries whose "via" only lists other package names are transitive:
+  // the real advisory is already reported on the root vulnerable package.
+  const advisoriesOf = (v) => (v.via ?? []).filter((x) => typeof x === 'object');
+  // Packages npm can't fix itself (no fix, or only by updating a package not in package.json)
+  // may still be fixable with an "overrides" entry.
+  const wanted = new Map(vulns
+    .filter(([, v]) => npmFix(v.fixAvailable, direct).type === 'manual')
+    .map(([pkg, v]) => [pkg, advisoriesOf(v).map((a) => a.range).filter(Boolean)])
+    .filter(([, ranges]) => ranges.length));
+  const overrides = wanted.size ? await npmOverrideFixes(dir, wanted) : new Map();
+
   const findings = [];
-  for (const [pkg, v] of Object.entries(data.vulnerabilities ?? {})) {
-    // Entries whose "via" only lists other package names are transitive:
-    // the real advisory is already reported on the root vulnerable package.
-    const advisories = (v.via ?? []).filter((x) => typeof x === 'object');
-    for (const adv of advisories) {
+  for (const [pkg, v] of vulns) {
+    for (const adv of advisoriesOf(v)) {
       findings.push(
         makeFinding({
           tool: 'npm-audit',
@@ -156,7 +166,7 @@ export async function scanNpmAudit(dir) {
           description: `Vulnerable versions: ${adv.range ?? 'unknown'}. Installed at: ${(v.nodes ?? []).slice(0, 3).join(', ') || 'n/a'}.`,
           cwe: adv.cwe ?? [],
           url: adv.url ?? null,
-          fix: npmFix(v.fixAvailable, direct),
+          fix: overrides.get(pkg) ?? npmFix(v.fixAvailable, direct),
         }),
       );
     }

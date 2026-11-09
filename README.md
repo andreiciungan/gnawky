@@ -116,6 +116,17 @@ Gnawky uses `yarn audit` and works out a fix for each vulnerable package, withou
 
 Upgrades run before overrides, and an override is skipped when an earlier upgrade already removed the vulnerable versions. Yarn 2+ (Berry) and pnpm lockfiles are not supported yet.
 
+### Forcing a version of a sub-dependency
+
+When a vulnerable package is only installed by other packages and they pin an old version, `npm audit fix` can't help. Gnawky then forces the lowest patched version: with `"resolutions"` in Yarn projects and `"overrides"` in npm projects (it looks up the published versions with `npm view`, from the registry your project uses). Like resolutions, an override is labeled risky, or breaking when it crosses a major version, and is never used when it would move healthy copies to another major version (Gnawky suggests a nested override instead).
+
+Before the plan runs, Gnawky asks how to write each forced version, and marks one choice as recommended:
+
+- **`^2.5.6` (range)**: later 2.x releases still arrive, including future security fixes. Recommended by default.
+- **`2.5.6` (exact)**: stays on that version until you change it. Pick this if a newer release is broken. Recommended when `package.json` already pins that package exactly, or when the project pins its dependencies exactly (`save-exact` in `.npmrc` / `.yarnrc`, or every dependency in `package.json` is an exact version).
+
+To force a version Gnawky didn't suggest (for example an older one, because the latest has a bug), edit the entry yourself: Gnawky keeps it, and recommends keeping it exact the next time it has to change it.
+
 ## Safety model
 
 - **The scan is read-only.** Nothing changes unless you choose a fix in the app and confirm the plan.
