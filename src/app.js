@@ -1177,7 +1177,19 @@ async function offerInstall(t) {
   return ok;
 }
 
-/** First-run setup: detect the stack, recommend and install tools, pick semgrep rules, first scan. */
+/** Setup step 3: offers to turn on the package check (src/shellhook.js). Returns true if it is on afterwards. */
+async function offerPackageCheck(file) {
+  const short = file.replace(os.homedir(), '~');
+  const choice = await select('Turn on the package check?', [
+    { label: `Turn on now  ${c.gray(`(adds a marked block to ${short}; Settings turns it off)`)}`, value: 'on' },
+    { label: 'Skip', value: 'skip' },
+  ]);
+  if (choice !== 'on') return false;
+  install(file);
+  console.log(c.green(`\n✔ Package check added to ${short}.`) + ' It works in terminals you open from now on.\n');
+  return true;
+}
+
 /** Setup step 2: online or offline. Resolves 'online', 'offline', or null (back). */
 async function networkStep(s) {
   header(s, { logo: true, below: 27 }); // the step's lines plus the menu; the logo hides on short terminals
@@ -1245,6 +1257,12 @@ async function setupScreen(s, { firstRun = false } = {}) {
     console.log(`  ${icon} ${c.bold(t.cmd.padEnd(9))} ${version ? c.gray(version) : c.yellow('not installed')}  ${tag}`);
     console.log(`      ${c.gray(reason)}`);
   }
+  // Not a scanner: shell functions that check packages before npm install <pkg> / yarn add <pkg>.
+  const hookFile = rcFile();
+  const hookOn = Boolean(hookFile) && isHookInstalled(hookFile);
+  const hookState = hookOn ? c.gray(`on (${hookFile.replace(os.homedir(), '~')})`) : hookFile ? c.yellow('off') : c.gray('needs zsh or bash');
+  console.log(`  ${hookOn ? c.green('✔') : hookFile ? c.red('✖') : c.gray('–')} ${c.bold('pkg check')} ${hookState}  ${hookFile ? c.accent('recommended') : c.gray('optional')}`);
+  console.log(`      ${c.gray('Checks new packages before npm install <pkg> / yarn add <pkg>, in all projects.')}`);
   console.log();
   if (s.cfg.offline) {
     if (recs.some((r) => r.t.cmd === 'semgrep')) {
@@ -1256,7 +1274,8 @@ async function setupScreen(s, { firstRun = false } = {}) {
     console.log();
   }
   const missing = recs.filter((r) => !r.version && r.level !== 'required');
-  if (!missing.length) {
+  const offerHook = Boolean(hookFile) && !hookOn;
+  if (!missing.length && !offerHook) {
     console.log(c.green('All set: every tool is installed.\n'));
     await pause();
   } else {
@@ -1266,6 +1285,12 @@ async function setupScreen(s, { firstRun = false } = {}) {
     for (const { t } of missing) {
       console.log(`${c.bold(t.cmd)}: ${c.gray(t.why)}`);
       await offerInstall(t);
+      console.log();
+    }
+    if (offerHook) {
+      console.log(`${c.bold('pkg check')}: ${c.gray('looks for vulnerabilities, malware and brand-new versions before installing')}`);
+      if (s.cfg.offline) console.log(c.gray('It is skipped in projects set to offline, like this one.'));
+      await offerPackageCheck(hookFile);
       console.log();
     }
     await pause();
