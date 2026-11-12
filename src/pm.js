@@ -33,3 +33,8 @@ export const auditName = (pm) => (pm === 'yarn' ? 'yarn audit' : 'npm audit');
 
 export const DEP_AUDIT_TOOLS = ['npm-audit', 'yarn-audit'];
 export const isDepAudit = (f) => DEP_AUDIT_TOOLS.includes(f.tool);
+
+/** The check for React advisories in the copy of React that Next.js bundles (src/nextjs.js). */
+export const NEXT_REACT_TOOL = 'next-bundled-react';
+/** Any finding about a dependency, including ones npm/yarn audit can't fix or re-check. */
+export const isDependencyFinding = (f) => isDepAudit(f) || f.tool === NEXT_REACT_TOOL;

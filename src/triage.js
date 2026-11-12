@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { OUT_DIR, ensureOutDir } from './config.js';
-import { isDepAudit } from './pm.js';
+import { isDependencyFinding } from './pm.js';
 import { rank } from './finding.js';
 import { scanGitleaks, isAvailable } from './scanners.js';
 
@@ -65,7 +65,7 @@ export function triageItems(findings) {
     groups.get(key).findings.push(f);
   };
   for (const f of findings) {
-    if (isDepAudit(f) && f.package) group(`pkg:${f.package}`, { kind: 'dependency', package: f.package }, f);
+    if (isDependencyFinding(f) && f.package) group(`pkg:${f.package}`, { kind: 'dependency', package: f.package }, f);
     else if (f.tool === 'gitleaks' && f.file) group(`file:${f.file}`, { kind: 'secret', file: f.file }, f);
     else items.push({ kind: f.tool === 'gitleaks' ? 'secret' : 'code', findings: [f] });
   }
@@ -74,7 +74,7 @@ export function triageItems(findings) {
 
 /** Which kind of finding this is, for choosing what to triage. */
 export const TRIAGE_SOURCES = { dependencies: 'dependencies', code: 'code', secrets: 'secrets' };
-export const findingSource = (f) => (isDepAudit(f) ? 'dependencies' : f.tool === 'gitleaks' ? 'secrets' : 'code');
+export const findingSource = (f) => (isDependencyFinding(f) ? 'dependencies' : f.tool === 'gitleaks' ? 'secrets' : 'code');
 
 /** At most this many Claude runs at the same time. */
 export const MAX_PARALLEL = 3;

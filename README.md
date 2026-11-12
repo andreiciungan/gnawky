@@ -16,11 +16,14 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 | Scanner | Finds | Required? |
 |---|---|---|
 | `npm audit` / `yarn audit` | Known-vulnerable dependencies (`package-lock.json` or a Yarn 1 `yarn.lock`) | Yes (npm comes with Node; yarn projects need `yarn`) |
+| Next.js bundled React | React Server Components advisories in the copy of React that Next.js bundles, which `npm audit` can't see | Built in, only in Next.js projects (needs `node_modules` and Online mode) |
 | [gitleaks](https://github.com/gitleaks/gitleaks) | Secrets in files and git history | Optional, recommended |
 | [semgrep](https://semgrep.dev) | Risky code (injection, XSS, unsafe `eval`, etc.) | Optional, recommended |
 | Full audit (Claude + Cloudflare's security-audit skill) | Vulnerabilities in your own logic that pattern scanners miss | Optional, started from AI tools in the menu |
 
 Missing optional scanners are reported as "skipped", never silently ignored. While a scan runs, each scanner shows a live line with a running clock, and the summary lists how long each one took. Semgrep stops after 30 minutes with a clear message instead of hanging.
+
+**Next.js bundled React.** Next.js ships its own copy of React's server code, and it patches that copy without changing its version, so neither `npm audit` nor a version check can tell whether your Next.js has a React fix. Gnawky reports only what is certain: React Server Components advisories disclosed *after* your installed Next.js was released, which that release can't contain. It stays quiet for newer releases; once Next.js publishes its own advisory, `npm audit` reports it. Dates come from the GitHub API (60 requests an hour without a token, or set `GITHUB_TOKEN`) and are cached in `.gnawky/cache/`.
 
 ```bash
 brew install gitleaks semgrep        # macOS

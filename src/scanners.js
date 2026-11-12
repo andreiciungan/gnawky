@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeFinding } from './finding.js';
-import { packageManager, auditName } from './pm.js';
+import { packageManager, auditName, NEXT_REACT_TOOL } from './pm.js';
+import { usesNext, scanNextBundledReact } from './nextjs.js';
 import { scanYarnAudit } from './yarn.js';
 import { scanAudit, AUDIT_TOOL } from './audit.js';
 import { npmOverrideFixes } from './overrides.js';
@@ -313,6 +314,10 @@ export async function runAllScanners(dir, log = () => {}, opts = {}) {
     ['npm-audit', () => `running ${auditName(packageManager(dir))}`, () => (offline
       ? { skipped: 'offline mode (the dependency audit needs the npm registry)' }
       : scanDependencies(dir))],
+    // Only in Next.js projects: elsewhere the step is left out instead of reported as skipped.
+    ...(usesNext(dir) ? [[NEXT_REACT_TOOL, 'checking the React bundled in Next.js', () => (offline
+      ? { skipped: 'offline mode (the check needs the GitHub advisory API)' }
+      : scanNextBundledReact(dir))]] : []),
     ['gitleaks', 'running gitleaks on your files and git history', () => scanGitleaks(dir)],
     ['semgrep', semgrepLabel, () => (semgrepRules.length
       ? scanSemgrep(dir, semgrepRules, { skipTests })

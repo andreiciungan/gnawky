@@ -7,7 +7,7 @@ export const OUT_DIR = '.gnawky';
 export const DEFAULT_CONFIG = {
   minSeverity: 'low',
   offline: false,
-  scanners: { 'npm-audit': true, gitleaks: true, semgrep: true },
+  scanners: { 'npm-audit': true, 'next-bundled-react': true, gitleaks: true, semgrep: true },
   semgrepConfigs: ['p/javascript', 'p/nodejsscan'],
   // Skip __mocks__, __tests__, fixtures, *.spec.* and *.test.* in semgrep (much faster on big projects).
   semgrepSkipTests: true,
