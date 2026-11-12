@@ -323,6 +323,10 @@ export async function guard(argv) {
       say(c.yellow(`${tag}: check failed (${e.message}); running ${pm} without it`));
     }
   }
+  // Tells the shell function Gnawky started and decided; without it the function runs npm/yarn itself.
+  if (process.env.GNAWKY_DECIDED) {
+    try { fs.writeFileSync(process.env.GNAWKY_DECIDED, go ? 'install' : 'declined'); } catch { /* best effort */ }
+  }
   if (go) runReal(pm, args);
   else process.exit(1);
 }

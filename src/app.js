@@ -25,7 +25,7 @@ import {
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
-import { rcFile, isInstalled as isHookInstalled, install, uninstall } from './shellhook.js';
+import { rcFile, isInstalled as isHookInstalled, install, uninstall, refresh as refreshHook } from './shellhook.js';
 import { recommendPin, pinSpec } from './overrides.js';
 import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
@@ -1418,6 +1418,8 @@ export async function startApp(dir, { offline = false } = {}) {
   const s = {
     dir, flags: { offline }, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
   };
+  // A block added by an older Gnawky gets the current shell functions (it's Gnawky's own marked block).
+  try { refreshHook(); } catch { /* unreadable or read-only startup file: keep the old block */ }
   try {
     if (!s.pkg) {
       header(s);
