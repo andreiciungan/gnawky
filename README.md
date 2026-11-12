@@ -9,6 +9,8 @@
 
 Gnawky is a local security scanner for Node.js projects. It combines proven open-source scanners, writes one report, and lets you choose per finding: **fix**, **ignore (with a reason)**, or **skip**. It also ships as a Claude Code plugin that explains findings and proposes fixes.
 
+It can also stop risky packages before they reach your project: a [check before `npm install <pkg>` / `yarn add`](#checking-packages-before-you-install-them), pasted commands included, and a [pre-commit check](#pre-commit-dependency-check) that blocks commits adding vulnerable dependencies.
+
 **New to Gnawky?** The [presentation](https://webdevs.ro/gnawky/) walks through what it does, how to use it and why.
 
 ## What it checks
@@ -203,7 +205,9 @@ Check the current Claude Code plugin docs if the commands differ in your version
 
 - Built-in Node-specific checks (e.g. `helmet` missing in Express, `cookie` without `httpOnly`/`secure`)
 - Apply semgrep autofixes with per-edit approval
-- HTML report and SARIF output for GitHub code scanning
+- SARIF output for GitHub code scanning
+- A GitHub Actions workflow that checks pull requests that change dependencies, plus a weekly run for new advisories (needs Gnawky published on npm)
+- Offer `ignore-scripts=true` in `.npmrc` / `.yarnrc`, listing the packages that would then need `npm rebuild`
 - Support for pnpm and Yarn 2+ lockfiles
 
 ## License
