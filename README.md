@@ -132,7 +132,7 @@ To force a version Gnawky didn't suggest (for example an older one, because the 
 
 ### Checking packages before you install them
 
-Turn on **Settings → Check packages before npm install / yarn add** and Gnawky checks every package you add, including commands pasted from the web. It adds two small shell functions to `~/.zshrc` (or `~/.bashrc`), in a marked block that Settings removes again. It applies to every project on the computer.
+Turn on **Settings → Check packages before npm install / yarn add** and Gnawky checks every package you add, including commands pasted from the web. It adds a few shell functions to `~/.zshrc` (for bash: `~/.bash_profile` on macOS, `~/.bashrc` elsewhere), in a marked block that Settings removes again. It applies to every project on the computer, and Gnawky updates the block when a newer version changes it.
 
 When you run `npm install <pkg>` (or `npm i`, `npm add`, `yarn add`, `yarn workspace <name> add`), Gnawky first resolves the new packages in a temporary folder with `npm install --package-lock-only --ignore-scripts`: nothing is downloaded into your project and no install scripts run. Only packages that aren't already in your lockfile are checked:
 
@@ -149,6 +149,7 @@ gnawky: install anyway? [y/N]
 - **Everything else runs unchanged**: `npm install`, `npm run …`, `yarn build`. Global installs aren't checked, and neither are git URLs, local paths or tarballs. Skip the check once with `GNAWKY_SKIP=1 npm install <pkg>`.
 - **Never blocks an install by breaking**: if the check can't run (no network, a resolution error, offline mode in that project), the command runs as usual with a note.
 - **Privacy**: advisories come from your configured registry (like `npm audit`). Publish dates come from [deps.dev](https://deps.dev), and only for packages resolved from the public npm registry, so private package names never leave your registry.
+- **Works with Node version managers**: nvm (also with lazy loading, where `npm` is a function that loads nvm first), fnm, Volta, asdf and corepack. When Gnawky isn't installed for the Node version in use (after `nvm use`), you get a one-time note and the command runs unchecked. If Gnawky itself can't start, the command runs as usual; Ctrl+C during the check stops it.
 - **Limits**: it only covers your own terminal (zsh and bash), not CI, IDE buttons or teammates. A malicious package published hours ago has no advisory yet; the 2-day check is the only signal for those.
 
 ## Safety model
