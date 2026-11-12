@@ -108,6 +108,12 @@ export function select(title, options, { initial = null, keys = {}, hint = '', f
       ? initial
       : Math.max(0, options.findIndex((o) => !o.disabled));
     let drawn = 0;
+    // Removes the menu from the screen: before a redraw, and once a choice is made, so the
+    // next screen or submenu doesn't appear below a stale copy of this one.
+    const erase = () => {
+      if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      drawn = 0;
+    };
     // idx >= options.length points into the footer.
     const inFooter = () => idx >= options.length;
     const numbered = options.some((o) => Number.isInteger(o.number));
@@ -121,7 +127,7 @@ export function select(title, options, { initial = null, keys = {}, hint = '', f
     let pickTimer = null;
 
     const render = () => {
-      if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      erase();
       const lines = [c.bold(truncate(title, cols()))];
       const n = options.length;
       const size = Math.min(n, maxVisible());
@@ -173,6 +179,7 @@ export function select(title, options, { initial = null, keys = {}, hint = '', f
 
     const finish = (value, err) => {
       clearTimeout(pickTimer);
+      erase();
       input.removeListener('keypress', onKey);
       if (input.isTTY) input.setRawMode(false);
       input.pause();
@@ -249,6 +256,12 @@ export function checklist(view) {
     const box = { on: c.green('[x]'), partial: c.yellow('[~]'), off: '[ ]' };
     let idx = view.cursor ?? 0;
     let drawn = 0;
+    // Removes the menu from the screen: before a redraw, and once a choice is made, so the
+    // next screen or submenu doesn't appear below a stale copy of this one.
+    const erase = () => {
+      if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      drawn = 0;
+    };
     const selectable = (i) => !('heading' in (view.items()[i] ?? { heading: '' }));
     const move = (d) => {
       const n = view.items().length;
@@ -260,7 +273,7 @@ export function checklist(view) {
     if (!selectable(idx)) move(1);
 
     const render = () => {
-      if (drawn) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      erase();
       const items = view.items();
       idx = Math.min(idx, Math.max(0, items.length - 1));
       view.cursor = idx;
@@ -285,6 +298,7 @@ export function checklist(view) {
     };
 
     const finish = (value, err) => {
+      erase();
       input.removeListener('keypress', onKey);
       if (input.isTTY) input.setRawMode(false);
       input.pause();
