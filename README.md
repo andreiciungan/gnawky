@@ -59,7 +59,7 @@ The first time you start Gnawky in a project, a short setup runs:
 
 1. **Your project:** detects the stack (TypeScript, Express, React, Next.js, Docker, GitHub Actions, databases, auth libraries), checks for a lockfile and git, and warns if a `.env` file is not ignored by git. It only reads `package.json` and file names.
 2. **Network access:** choose **Online** (recommended: the dependency audit sends your dependency list to the npm registry, semgrep downloads its rulesets, and the AI tools are available) or **Offline** (nothing leaves this computer, but only gitleaks runs unless you add a local semgrep rules file, and the AI tools are off). Saved per project; change it any time in Settings. Starting with `gnawky --offline` pre-selects Offline.
-3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to.
+3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to. It also recommends the [package check](#checking-packages-before-you-install-them) when it isn't on yet.
 4. **First scan:** saves semgrep rules that match the stack (for example `p/expressjs`, `p/react`, `p/dockerfile`) and offers to run the first scan.
 
 You can run the setup again from Settings. After that you get an interactive menu (arrow keys + Enter, or number keys; `q`/Esc goes back):
