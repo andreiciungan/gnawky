@@ -47,6 +47,12 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  // Called by the shell functions Gnawky adds (Settings → package check), never by hand.
+  if (process.argv[2] === 'guard') {
+    const { guard } = await import('../src/guard.js');
+    await guard(process.argv.slice(3));
+    return;
+  }
   const o = parseArgs(process.argv.slice(2));
   const dir = path.resolve(o.target);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {

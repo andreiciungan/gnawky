@@ -130,6 +130,27 @@ Before the plan runs, Gnawky asks how to write each forced version, and marks on
 
 To force a version Gnawky didn't suggest (for example an older one, because the latest has a bug), edit the entry yourself: Gnawky keeps it, and recommends keeping it exact the next time it has to change it.
 
+### Checking packages before you install them
+
+Turn on **Settings → Check packages before npm install / yarn add** and Gnawky checks every package you add, including commands pasted from the web. It adds two small shell functions to `~/.zshrc` (or `~/.bashrc`), in a marked block that Settings removes again. It applies to every project on the computer.
+
+When you run `npm install <pkg>` (or `npm i`, `npm add`, `yarn add`, `yarn workspace <name> add`), Gnawky first resolves the new packages in a temporary folder with `npm install --package-lock-only --ignore-scripts`: nothing is downloaded into your project and no install scripts run. Only packages that aren't already in your lockfile are checked:
+
+```
+$ yarn add lodash@4.17.20 minimist@0.0.8
+  ✖ 2 new packages checked, 3 problem(s) (3s)
+  ✖ HIGH lodash@4.17.20: Command Injection in lodash https://github.com/advisories/GHSA-35jh-r3h4-6jhm
+  ✖ CRITICAL minimist@0.0.8: Prototype Pollution in minimist https://github.com/advisories/GHSA-xvch-5gv4-984h
+  • MEDIUM lodash@4.17.20: Regular Expression Denial of Service (ReDoS) in lodash …
+gnawky: install anyway? [y/N]
+```
+
+- **Asks before installing** for high and critical advisories (including malware advisories), and for versions published in the last 2 days, before most malicious releases are caught. Install scripts and lower-severity advisories are shown without a question.
+- **Everything else runs unchanged**: `npm install`, `npm run …`, `yarn build`. Global installs aren't checked, and neither are git URLs, local paths or tarballs. Skip the check once with `GNAWKY_SKIP=1 npm install <pkg>`.
+- **Never blocks an install by breaking**: if the check can't run (no network, a resolution error, offline mode in that project), the command runs as usual with a note.
+- **Privacy**: advisories come from your configured registry (like `npm audit`). Publish dates come from [deps.dev](https://deps.dev), and only for packages resolved from the public npm registry, so private package names never leave your registry.
+- **Limits**: it only covers your own terminal (zsh and bash), not CI, IDE buttons or teammates. A malicious package published hours ago has no advisory yet; the 2-day check is the only signal for those.
+
 ## Safety model
 
 - **The scan is read-only.** Nothing changes unless you choose a fix in the app and confirm the plan.

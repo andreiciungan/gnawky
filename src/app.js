@@ -25,6 +25,7 @@ import {
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
+import { rcFile, isInstalled as isHookInstalled, install, uninstall } from './shellhook.js';
 import { recommendPin, pinSpec } from './overrides.js';
 import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
@@ -1039,6 +1040,7 @@ function openInBrowser(file) {
 
 async function settingsScreen(s) {
   const onoff = (v) => (v ? c.green('on') : c.gray('off'));
+  const hookFile = rcFile();
   for (;;) {
     header(s);
     const pick = await select(`Settings ${c.gray(`(saved in ${OUT_DIR}/config.json)`)}`, [
@@ -1050,6 +1052,7 @@ async function settingsScreen(s) {
       { label: `Scanner semgrep: ${onoff(s.cfg.scanners.semgrep)}`, value: 'semgrep' },
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
       { label: `Semgrep skips test and mock files: ${onoff(s.cfg.semgrepSkipTests !== false)}  ${c.gray('(much faster; gitleaks still checks them)')}`, value: 'tests' },
+      { label: `Check packages before npm install / yarn add: ${hookFile ? onoff(isHookInstalled(hookFile)) : c.gray('needs zsh or bash')}  ${c.gray(`(all projects${hookFile ? `, ${hookFile.replace(os.homedir(), '~')}` : ''})`)}`, value: 'hook', disabled: !hookFile },
       { label: 'Run setup again (detect stack, install tools)', value: 'setup' },
       { label: 'Reset to defaults', value: 'reset' },
       { label: 'Back', value: null },
@@ -1067,6 +1070,9 @@ async function settingsScreen(s) {
       console.log(c.gray('In offline mode only local files are used.'));
       const v = await ask('Comma-separated list (empty = keep current): ');
       if (v) s.cfg.semgrepConfigs = v.split(',').map((x) => x.trim()).filter(Boolean);
+    } else if (pick === 'hook') {
+      await packageCheckScreen(s, hookFile);
+      continue;
     } else if (pick === 'setup') {
       await setupScreen(s);
       continue;
@@ -1079,6 +1085,32 @@ async function settingsScreen(s) {
     saveConfig(s.dir, s.cfg);
     s.stale = true;
   }
+}
+
+/** Turns the shell functions from shellhook.js on or off. They live in the user's shell startup file, not the project. */
+async function packageCheckScreen(s, file) {
+  header(s);
+  const short = file.replace(os.homedir(), '~');
+  const on = isHookInstalled(file);
+  console.log(c.bold('Check packages before npm install / yarn add\n'));
+  console.log('When you run (or paste) a command that adds packages, like `npm install express` or');
+  console.log('`yarn add lodash`, Gnawky first resolves the new packages without installing them and checks:');
+  console.log('  • known vulnerabilities and malware advisories (high and critical ask before installing)');
+  console.log(`  • versions published in the last 2 days, before most malicious releases are caught`);
+  console.log('  • packages that run install scripts (shown, no question)');
+  console.log(c.gray('\nOther commands (npm install, npm run, yarn build, …) run unchanged. Skip it once with'));
+  console.log(c.gray('GNAWKY_SKIP=1 npm install <pkg>. Publish dates come from deps.dev, only for public npm packages.'));
+  console.log(c.gray(`It adds a few lines to ${short} and applies to all projects on this computer.\n`));
+  if (!on) {
+    if (!(await confirm(`Turn it on (adds a marked block to ${short})?`))) return;
+    install(file);
+    console.log(c.green(`\n✔ Added to ${short}.`) + ` Open a new terminal, or run: ${c.bold(`source ${short}`)}`);
+  } else {
+    if (!(await confirm(`It's on. Turn it off (removes the block from ${short})?`))) return;
+    uninstall(file);
+    console.log(c.green(`\n✔ Removed from ${short}.`) + ' Open a new terminal for it to take effect.');
+  }
+  await pause();
 }
 
 // ------------------------------------------------------------------ setup
@@ -1178,6 +1210,7 @@ async function setupScreen(s, { firstRun = false } = {}) {
   console.log(c.gray('     (reads package.json and file names only; nothing leaves this computer)'));
   console.log('  2. Choose whether Gnawky may use the internet');
   console.log('  3. Recommend the scanners that fit it, and install the ones you want');
+  console.log(c.gray('     (plus a check of new packages before npm install / yarn add)'));
   console.log('  4. Run your first security scan');
   console.log(c.gray('\n  Scanning is read-only: nothing in your project changes unless you approve a fix.\n'));
   const start = await select('Ready?', [
