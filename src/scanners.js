@@ -127,7 +127,8 @@ function npmFix(fixAvailable, direct) {
   };
 }
 
-export async function scanNpmAudit(dir) {
+/** opts.fixes = false skips working out npm "overrides" fixes (extra npm calls), for checks that only report. */
+export async function scanNpmAudit(dir, { fixes = true } = {}) {
   const hasLock = ['package-lock.json', 'npm-shrinkwrap.json'].some((f) => fs.existsSync(path.join(dir, f)));
   if (!hasLock) return { skipped: 'no lockfile (create one with: npm install --package-lock-only --ignore-scripts, or yarn install)' };
 
@@ -151,7 +152,7 @@ export async function scanNpmAudit(dir) {
     .filter(([, v]) => npmFix(v.fixAvailable, direct).type === 'manual')
     .map(([pkg, v]) => [pkg, advisoriesOf(v).map((a) => a.range).filter(Boolean)])
     .filter(([, ranges]) => ranges.length));
-  const overrides = wanted.size ? await npmOverrideFixes(dir, wanted) : new Map();
+  const overrides = fixes && wanted.size ? await npmOverrideFixes(dir, wanted) : new Map();
 
   const findings = [];
   for (const [pkg, v] of vulns) {

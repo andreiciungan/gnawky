@@ -26,6 +26,7 @@ import {
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
 import { rcFile, isInstalled as isHookInstalled, install, uninstall, refresh as refreshHook } from './shellhook.js';
+import { hookTarget, isHookInstalled as isCommitHookOn, installHook, uninstallHook, LEFTHOOK_SNIPPET } from './githook.js';
 import { recommendPin, pinSpec } from './overrides.js';
 import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
@@ -1042,6 +1043,7 @@ async function settingsScreen(s) {
   const onoff = (v) => (v ? c.green('on') : c.gray('off'));
   const hookFile = rcFile();
   for (;;) {
+    const commitHook = hookTarget(s.dir);
     header(s);
     const pick = await select(`Settings ${c.gray(`(saved in ${OUT_DIR}/config.json)`)}`, [
       { label: `Minimum severity to show: ${c.bold(s.cfg.minSeverity)}`, value: 'sev' },
@@ -1053,6 +1055,7 @@ async function settingsScreen(s) {
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
       { label: `Semgrep skips test and mock files: ${onoff(s.cfg.semgrepSkipTests !== false)}  ${c.gray('(much faster; gitleaks still checks them)')}`, value: 'tests' },
       { label: `Check packages before npm install / yarn add: ${hookFile ? onoff(isHookInstalled(hookFile)) : c.gray('needs zsh or bash')}  ${c.gray(`(all projects${hookFile ? `, ${hookFile.replace(os.homedir(), '~')}` : ''})`)}`, value: 'hook', disabled: !hookFile },
+      ...(commitHook ? [{ label: `Pre-commit dependency check: ${commitHook.kind === 'lefthook' ? c.gray('add it to lefthook') : onoff(isCommitHookOn(commitHook))}  ${c.gray(`(${commitHookWhere(commitHook)})`)}`, value: 'commit-hook' }] : []),
       { label: 'Run setup again (detect stack, install tools)', value: 'setup' },
       { label: 'Reset to defaults', value: 'reset' },
       { label: 'Back', value: null },
@@ -1073,6 +1076,9 @@ async function settingsScreen(s) {
     } else if (pick === 'hook') {
       await packageCheckScreen(s, hookFile);
       continue;
+    } else if (pick === 'commit-hook') {
+      await commitHookScreen(s, commitHook);
+      continue;
     } else if (pick === 'setup') {
       await setupScreen(s);
       continue;
@@ -1085,6 +1091,58 @@ async function settingsScreen(s) {
     saveConfig(s.dir, s.cfg);
     s.stale = true;
   }
+}
+
+/** Where the pre-commit hook lives, for labels. */
+function commitHookWhere(t) {
+  if (t.kind === 'husky') return 'husky, shared with your team';
+  if (t.kind === 'lefthook') return 'lefthook.yml';
+  if (t.kind === 'custom') return `${path.relative(t.root, t.file)}${t.shared ? ', shared if committed' : ''}`;
+  return 'this clone only';
+}
+
+function explainCommitHook() {
+  console.log(c.bold('Pre-commit dependency check\n'));
+  console.log('When a commit changes package-lock.json or yarn.lock, Gnawky audits the dependencies in the');
+  console.log('commit and compares them with the last commit. It blocks the commit only when it adds new');
+  console.log('high or critical findings, so known issues you haven\'t fixed yet never block anyone.');
+  console.log(c.gray('\nIgnored findings (with a reason) don\'t block. Skip it once with git commit --no-verify.'));
+  console.log(c.gray('Without a network, in offline mode, or if gnawky isn\'t installed, the commit goes through.\n'));
+}
+
+/** Adds the hook (shell lines in the pre-commit script). Returns true if it is on afterwards. */
+function turnOnCommitHook(t) {
+  installHook(t);
+  const file = path.relative(t.root, t.file);
+  console.log(c.green(`\n✔ Added to ${file}.`));
+  if (t.kind === 'husky') console.log(`Commit ${c.bold(file)} so your team gets it too.`);
+  else if (t.kind === 'local') console.log(c.gray('It works in this clone only. To share it with your team, use husky, or turn it on in each clone.'));
+  else if (t.shared) console.log(`Commit ${c.bold(file)} so your team gets it too.`);
+  return true;
+}
+
+function printLefthookSnippet() {
+  console.log('This project uses lefthook, which rewrites the hook scripts itself. Add this to lefthook.yml');
+  console.log(`(merge it into an existing ${c.bold('pre-commit:')} section), then run ${c.bold('lefthook install')}:\n`);
+  console.log(LEFTHOOK_SNIPPET.split('\n').map((l) => `  ${l}`).join('\n'));
+  console.log();
+}
+
+/** Turns the git pre-commit hook from githook.js on or off for this project. */
+async function commitHookScreen(s, t) {
+  header(s);
+  explainCommitHook();
+  if (t.kind === 'lefthook') {
+    printLefthookSnippet();
+  } else if (!isCommitHookOn(t)) {
+    if (await confirm(`Turn it on (adds a marked block to ${path.relative(t.root, t.file)})?`)) turnOnCommitHook(t);
+    else return;
+  } else {
+    if (!(await confirm(`It's on. Turn it off (removes the block from ${path.relative(t.root, t.file)})?`))) return;
+    uninstallHook(t);
+    console.log(c.green('\n✔ Removed.'));
+  }
+  await pause();
 }
 
 /** Turns the shell functions from shellhook.js on or off. They live in the user's shell startup file, not the project. */
@@ -1222,7 +1280,7 @@ async function setupScreen(s, { firstRun = false } = {}) {
   console.log(c.gray('     (reads package.json and file names only; nothing leaves this computer)'));
   console.log('  2. Choose whether Gnawky may use the internet');
   console.log('  3. Recommend the scanners that fit it, and install the ones you want');
-  console.log(c.gray('     (plus a check of new packages before npm install / yarn add)'));
+  console.log(c.gray('     (plus checks of new packages before npm install / yarn add, and before git commit)'));
   console.log('  4. Run your first security scan');
   console.log(c.gray('\n  Scanning is read-only: nothing in your project changes unless you approve a fix.\n'));
   const start = await select('Ready?', [
@@ -1263,6 +1321,14 @@ async function setupScreen(s, { firstRun = false } = {}) {
   const hookState = hookOn ? c.gray(`on (${hookFile.replace(os.homedir(), '~')})`) : hookFile ? c.yellow('off') : c.gray('needs zsh or bash');
   console.log(`  ${hookOn ? c.green('✔') : hookFile ? c.red('✖') : c.gray('–')} ${c.bold('pkg check')} ${hookState}  ${hookFile ? c.accent('recommended') : c.gray('optional')}`);
   console.log(`      ${c.gray('Checks new packages before npm install <pkg> / yarn add <pkg>, in all projects.')}`);
+  // Not a scanner either: the git hook that blocks commits adding vulnerable dependencies.
+  const commitHook = p.lockfile ? hookTarget(s.dir) : null;
+  const commitOn = Boolean(commitHook) && isCommitHookOn(commitHook);
+  if (commitHook) {
+    const state = commitOn ? c.gray(`on (${commitHookWhere(commitHook)})`) : commitHook.kind === 'lefthook' ? c.yellow('add it to lefthook.yml') : c.yellow('off');
+    console.log(`  ${commitOn ? c.green('✔') : c.red('✖')} ${c.bold('pre-commit')} ${state}  ${c.accent('recommended')}`);
+    console.log(`      ${c.gray('Blocks commits that add dependencies with new high or critical advisories.')}`);
+  }
   console.log();
   if (s.cfg.offline) {
     if (recs.some((r) => r.t.cmd === 'semgrep')) {
@@ -1275,7 +1341,8 @@ async function setupScreen(s, { firstRun = false } = {}) {
   }
   const missing = recs.filter((r) => !r.version && r.level !== 'required');
   const offerHook = Boolean(hookFile) && !hookOn;
-  if (!missing.length && !offerHook) {
+  const offerCommit = Boolean(commitHook) && !commitOn;
+  if (!missing.length && !offerHook && !offerCommit) {
     console.log(c.green('All set: every tool is installed.\n'));
     await pause();
   } else {
@@ -1291,6 +1358,15 @@ async function setupScreen(s, { firstRun = false } = {}) {
       console.log(`${c.bold('pkg check')}: ${c.gray('looks for vulnerabilities, malware and brand-new versions before installing')}`);
       if (s.cfg.offline) console.log(c.gray('It is skipped in projects set to offline, like this one.'));
       await offerPackageCheck(hookFile);
+      console.log();
+    }
+    if (offerCommit) {
+      console.log(`${c.bold('pre-commit')}: ${c.gray(`blocks commits that add vulnerable dependencies (${commitHookWhere(commitHook)})`)}`);
+      if (commitHook.kind === 'lefthook') printLefthookSnippet();
+      else if ((await select('Turn on the pre-commit check?', [
+        { label: `Turn on now  ${c.gray(`(adds a marked block to ${path.relative(commitHook.root, commitHook.file)}; Settings turns it off)`)}`, value: 'on' },
+        { label: 'Skip', value: 'skip' },
+      ])) === 'on') turnOnCommitHook(commitHook);
       console.log();
     }
     await pause();
