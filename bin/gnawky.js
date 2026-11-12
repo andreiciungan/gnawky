@@ -16,6 +16,8 @@ Headless mode (CI, scripts, the Claude plugin):
   gnawky [path] --no-ui          scan and write .gnawky/security-report.md and .html
   gnawky [path] --json           print findings as JSON on stdout
   gnawky [path] --ci             exit with code 1 if findings remain
+  gnawky pre-commit              check dependencies in the staged lockfile (used by the git hook);
+                                 fails only on new high/critical findings (--min-severity to change)
 
 Options for headless mode (override .gnawky/config.json):
   --min-severity <level>   critical | high | medium | low | info
@@ -51,6 +53,18 @@ async function main() {
   if (process.argv[2] === 'guard') {
     const { guard } = await import('../src/guard.js');
     await guard(process.argv.slice(3));
+    return;
+  }
+  // Run by the git hook Gnawky adds (Settings → pre-commit check).
+  if (process.argv[2] === 'pre-commit') {
+    const i = process.argv.indexOf('--min-severity');
+    const minSeverity = i > -1 ? process.argv[i + 1] : 'high';
+    if (!SEVERITY_ORDER.includes(minSeverity)) {
+      console.error(`--min-severity must be one of: ${SEVERITY_ORDER.join(', ')}`);
+      process.exit(2);
+    }
+    const { preCommit } = await import('../src/precommit.js');
+    process.exitCode = await preCommit({ minSeverity });
     return;
   }
   const o = parseArgs(process.argv.slice(2));

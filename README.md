@@ -59,7 +59,7 @@ The first time you start Gnawky in a project, a short setup runs:
 
 1. **Your project:** detects the stack (TypeScript, Express, React, Next.js, Docker, GitHub Actions, databases, auth libraries), checks for a lockfile and git, and warns if a `.env` file is not ignored by git. It only reads `package.json` and file names.
 2. **Network access:** choose **Online** (recommended: the dependency audit sends your dependency list to the npm registry, semgrep downloads its rulesets, and the AI tools are available) or **Offline** (nothing leaves this computer, but only gitleaks runs unless you add a local semgrep rules file, and the AI tools are off). Saved per project; change it any time in Settings. Starting with `gnawky --offline` pre-selects Offline.
-3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to. It also recommends the [package check](#checking-packages-before-you-install-them) when it isn't on yet.
+3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to. It also recommends the [package check](#checking-packages-before-you-install-them) and the [pre-commit check](#pre-commit-dependency-check) when they aren't on yet.
 4. **First scan:** saves semgrep rules that match the stack (for example `p/expressjs`, `p/react`, `p/dockerfile`) and offers to run the first scan.
 
 You can run the setup again from Settings. After that you get an interactive menu (arrow keys + Enter, or number keys; `q`/Esc goes back):
@@ -151,6 +151,24 @@ gnawky: install anyway? [y/N]
 - **Privacy**: advisories come from your configured registry (like `npm audit`). Publish dates come from [deps.dev](https://deps.dev), and only for packages resolved from the public npm registry, so private package names never leave your registry.
 - **Works with Node version managers**: nvm (also with lazy loading, where `npm` is a function that loads nvm first), fnm, Volta, asdf and corepack. When Gnawky isn't installed for the Node version in use (after `nvm use`), you get a one-time note and the command runs unchecked. If Gnawky itself can't start, the command runs as usual; Ctrl+C during the check stops it.
 - **Limits**: it only covers your own terminal (zsh and bash), not CI, IDE buttons or teammates. A malicious package published hours ago has no advisory yet; the 2-day check is the only signal for those.
+
+### Pre-commit dependency check
+
+The package check only covers your own terminal. The pre-commit check is the next layer: turn it on in **Settings → Pre-commit dependency check** (setup recommends it too). When a commit changes `package-lock.json` or `yarn.lock`, Gnawky audits the dependencies in the commit, compares them with the last commit, and blocks the commit only if it **adds** high or critical findings:
+
+```
+  gnawky: package-lock.json changed, checking new dependencies…
+  ✖ package-lock.json: 2 new finding(s), 2 lower-severity (1s)
+  HIGH     lodash: Command Injection in lodash  https://github.com/advisories/GHSA-35jh-r3h4-6jhm
+
+Commit blocked: this commit adds 2 high/critical finding(s).
+Fix them (gnawky → Findings), ignore them with a reason in gnawky, or commit anyway with git commit --no-verify.
+```
+
+- **Old findings never block**, so a project with known issues can still commit. Ignored findings (with a reason) don't block either.
+- **Where it goes**: with husky, in `.husky/pre-commit`, so the team gets it when you commit that file. With another `core.hooksPath`, in that folder. Otherwise in `.git/hooks/pre-commit`, for this clone only. For lefthook, Gnawky shows a snippet for `lefthook.yml`, because lefthook rewrites its hook scripts. An existing hook keeps working: Gnawky adds a marked block at the top and removes only that block again.
+- **Never blocks for its own problems**: in offline mode, without a network, if the audit fails, or for teammates who don't have gnawky installed, the commit goes through (with a note).
+- Run it by hand with `gnawky pre-commit` (`--min-severity critical` to block only critical findings).
 
 ## Safety model
 
