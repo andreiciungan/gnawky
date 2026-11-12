@@ -24,6 +24,7 @@ import {
   planSteps, regressions, undoFix, isForced,
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
+import { usesNext } from './nextjs.js';
 import { recommendPin, pinSpec } from './overrides.js';
 import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
@@ -1044,6 +1045,7 @@ async function settingsScreen(s) {
       { label: `Minimum severity to show: ${c.bold(s.cfg.minSeverity)}`, value: 'sev' },
       { label: `Offline mode: ${onoff(s.cfg.offline)}  ${c.gray('(nothing leaves this computer)')}`, value: 'offline' },
       { label: `Scanner ${auditName(s.pm)}: ${onoff(s.cfg.scanners['npm-audit'])}`, value: 'npm-audit' },
+      ...(usesNext(s.dir) ? [{ label: `Scanner Next.js bundled React: ${onoff(s.cfg.scanners['next-bundled-react'])}`, value: 'next-bundled-react' }] : []),
       { label: `Scanner gitleaks: ${onoff(s.cfg.scanners.gitleaks)}`, value: 'gitleaks' },
       { label: `Scanner semgrep: ${onoff(s.cfg.scanners.semgrep)}`, value: 'semgrep' },
       { label: `Semgrep rules: ${s.cfg.semgrepConfigs.join(', ')}`, value: 'rules' },
