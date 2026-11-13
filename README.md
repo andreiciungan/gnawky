@@ -144,9 +144,14 @@ $ yarn add lodash@4.17.20 minimist@0.0.8
   ✖ HIGH lodash@4.17.20: Command Injection in lodash https://github.com/advisories/GHSA-35jh-r3h4-6jhm
   ✖ CRITICAL minimist@0.0.8: Prototype Pollution in minimist https://github.com/advisories/GHSA-xvch-5gv4-984h
   • MEDIUM lodash@4.17.20: Regular Expression Denial of Service (ReDoS) in lodash …
+  Recommended:
+    lodash@4.18.1   latest, fixes these advisories
+    minimist@1.2.8  latest, fixes these advisories, major update from 0.0.8, check its changelog
+  → yarn add lodash@4.18.1 minimist@1.2.8
 gnawky: install anyway? [y/N]
 ```
 
+- **Recommends a safe version** for each flagged package (the version that fixes the advisories, and whether it's the latest), with the same command rewritten to use it. When there's no fixed version, it says so.
 - **Asks before installing** for high and critical advisories (including malware advisories), and for versions published in the last 2 days, before most malicious releases are caught. Install scripts and lower-severity advisories are shown without a question.
 - **Everything else runs unchanged**: `npm install`, `npm run …`, `yarn build`. Global installs aren't checked, and neither are git URLs, local paths or tarballs. Skip the check once with `GNAWKY_SKIP=1 npm install <pkg>`.
 - **Never blocks an install by breaking**: if the check can't run (no network, a resolution error, offline mode in that project), the command runs as usual with a note.
