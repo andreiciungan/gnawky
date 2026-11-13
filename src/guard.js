@@ -155,8 +155,9 @@ async function resolveNew(dir, lockDir, pm, specs) {
       seen.add(key);
       pkgs.push({ name, version: e.version, resolved: e.resolved ?? '', installScript: Boolean(e.hasInstallScript) });
     }
-    const audit = pkgs.length ? await auditTree(tmp, reg) : { advisories: new Map() };
-    return { pkgs, ...audit };
+    const audit = pkgs.length ? await auditTree(tmp, reg) : { advisories: new Map(), direct: new Map() };
+    const versions = Object.fromEntries(Object.keys(deps).map((n) => [n, lock.packages?.[`node_modules/${n}`]?.version]));
+    return { pkgs, versions, reg, ...audit };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -166,15 +167,19 @@ async function resolveNew(dir, lockDir, pm, specs) {
 async function auditTree(tmp, reg) {
   const r = await runAsync('npm', ['audit', '--json', ...reg], { cwd: tmp, timeoutMs: 2 * 60 * 1000 });
   let data;
-  try { data = JSON.parse(r.stdout); } catch { return { advisories: new Map(), auditError: 'npm audit gave no result' }; }
-  if (data.error) return { advisories: new Map(), auditError: data.error.summary ?? 'npm audit failed' };
+  try { data = JSON.parse(r.stdout); } catch { return { advisories: new Map(), direct: new Map(), auditError: 'npm audit gave no result' }; }
+  if (data.error) return { advisories: new Map(), direct: new Map(), auditError: data.error.summary ?? 'npm audit failed' };
   const advisories = new Map();
+  // Packages the command adds directly that have high/critical problems (their own, or through
+  // their dependencies), with the version npm would move to: { name, version, isSemVerMajor } or false.
+  const direct = new Map();
   for (const [name, v] of Object.entries(data.vulnerabilities ?? {})) {
     const list = (v.via ?? []).filter((x) => typeof x === 'object')
       .map((a) => ({ title: a.title, url: a.url, range: a.range, severity: SEVERITY[a.severity] ?? 'medium' }));
     if (list.length) advisories.set(name, list);
+    if (v.isDirect && BLOCKING.has(SEVERITY[v.severity])) direct.set(name, typeof v.fixAvailable === 'object' ? v.fixAvailable : false);
   }
-  return { advisories };
+  return { advisories, direct };
 }
 
 /** Publish dates from deps.dev, only for packages that came from the public registry (private names never leave). */
@@ -204,6 +209,45 @@ const ago = (iso) => {
   const h = (Date.now() - Date.parse(iso)) / 3600000;
   return h < 48 ? `${Math.max(1, Math.round(h))} hour(s) ago` : `${Math.round(h / 24)} days ago`;
 };
+
+/** The registry's "latest" version of a package, or null. */
+async function latestVersion(name, dir, reg) {
+  const r = await runAsync('npm', ['view', `${name}@latest`, 'version', ...reg], { cwd: dir, timeoutMs: 30000 });
+  const v = r.status === 0 ? r.stdout.trim().split('\n').pop().replace(/'/g, '') : '';
+  return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+}
+
+/**
+ * For each package the command adds that has high/critical problems: the version npm audit says
+ * fixes them (and whether that is the latest), or that there is none. When every one has a fix,
+ * also the same command with those versions, ready to paste.
+ */
+async function recommend(pm, args, dir, res) {
+  if (!res.direct?.size) return;
+  const items = await Promise.all([...res.direct].map(async ([name, fix]) => {
+    const latest = fix ? await latestVersion(name, dir, res.reg) : null;
+    return { name, fix, latest, from: res.versions?.[name] };
+  }));
+  const width = Math.max(...items.map((i) => (i.fix ? `${i.name}@${i.fix.version}` : i.name).length));
+  say(`  ${c.bold('Recommended:')}`);
+  for (const { name, fix, latest, from } of items) {
+    if (!fix) {
+      say(`    ${name.padEnd(width)}  ${c.yellow('no fixed version published')}${c.gray('; consider another package')}`);
+      continue;
+    }
+    const bits = [fix.version === latest ? 'latest' : null, 'fixes these advisories',
+      fix.isSemVerMajor ? `major update from ${from ?? 'the requested version'}, check its changelog` : null].filter(Boolean);
+    say(`    ${c.green(`${name}@${fix.version}`.padEnd(width))}  ${c.gray(bits.join(', '))}`);
+  }
+  if (items.every((i) => i.fix)) {
+    const fixes = new Map(items.map((i) => [i.name, i.fix.version]));
+    const safe = args.map((a) => {
+      const s = parseSpec(a);
+      return s && fixes.has(s.name) ? `${s.name}@${fixes.get(s.name)}` : a;
+    });
+    say(`  ${c.gray('→')} ${c.bold(`${pm} ${safe.join(' ')}`)}`);
+  }
+}
 
 function askYesNo(question) {
   return new Promise((resolve) => {
@@ -277,6 +321,9 @@ async function check(pm, args, cmd) {
     if (published && daysAgo(published) < NEW_VERSION_DAYS) young.push(`${id} (${ago(published)})`);
     if (p.installScript) scripts.push(id);
   }
+  // Critical before high; the "brand-new version" line (added below) comes last.
+  const sevOrder = (line) => (line.startsWith('CRITICAL') ? 0 : line.startsWith('HIGH') ? 1 : 2);
+  problems.sort((x, y) => sevOrder(x) - sevOrder(y));
   const list = (xs, max = 3) => xs.slice(0, max).join(', ') + (xs.length > max ? ` and ${xs.length - max} more` : '');
   if (young.length) {
     problems.push(`${young.length === 1 ? 'Published' : `${young.length} packages published`} in the last ${NEW_VERSION_DAYS} days: ${list(young)}. `
@@ -298,6 +345,7 @@ async function check(pm, args, cmd) {
   ].filter(Boolean);
   for (const h of hints) say(c.gray(`  ${h}`));
   if (!problems.length) return true;
+  await recommend(pm, args, dir, res);
 
   if (!process.stdin.isTTY) {
     say(c.yellow(`${tag}: not a terminal, so not asking; installing anyway`));
