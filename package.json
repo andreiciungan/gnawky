@@ -1,6 +1,6 @@
 {
   "name": "gnawky",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Gnawky: gnaws through your code, watches like a hawk. Local, read-only-by-default security scanner for Node.js projects, with an interactive fix workflow and a Claude Code plugin.",
   "keywords": [
     "security",
