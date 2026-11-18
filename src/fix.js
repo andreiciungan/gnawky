@@ -150,6 +150,31 @@ function applyStep(dir, step) {
   return { ok, output: `${r.stdout}\n${r.stderr}`, command: `npm ${args.join(' ')}` };
 }
 
+const MAX_NAMED_PACKAGES = 3;
+const MAX_BRANCH_LENGTH = 60;
+// @scope/name → scope-name; anything git refuses or that reads badly becomes "-".
+const refPart = (s) => s.replace(/^@/, '').replace(/[^\w.-]+/g, '-').replace(/\.{2,}/g, '.').replace(/^[-.]+|[-.]+$/g, '');
+
+/** The base name for a fix branch, from what it changes: fix/upgrade-axios-1.7.4, fix/upgrade-5-packages… */
+export function fixBranchBase(steps) {
+  const pkgs = steps.filter((s) => s.package);
+  const auditFix = steps.some((s) => s.kind === 'audit-fix');
+  if (auditFix && !pkgs.length) return 'fix/npm-audit-fix';
+  if (auditFix) return 'fix/upgrade-dependencies';
+  if (pkgs.length === 1) return `fix/upgrade-${refPart(pkgs[0].package)}-${refPart(pkgs[0].version)}`;
+  const named = `fix/upgrade-${pkgs.map((s) => refPart(s.package)).join('-')}`;
+  return pkgs.length <= MAX_NAMED_PACKAGES && named.length <= MAX_BRANCH_LENGTH ? named : `fix/upgrade-${pkgs.length}-packages`;
+}
+
+/** A fix branch name that doesn't exist yet (adds -2, -3, … when it does). */
+export function fixBranchName(dir, steps) {
+  const base = fixBranchBase(steps);
+  const taken = (name) => git(dir, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]).status === 0;
+  let name = base;
+  for (let i = 2; taken(name); i += 1) name = `${base}-${i}`;
+  return name;
+}
+
 // ------------------------------------------------------------ apply
 
 function applyDependencyFixes(dir, plan, log, report, opts) {
@@ -160,7 +185,7 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
     return;
   }
   const base = currentRef(dir);
-  const branch = `gnawky/fix-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+  const branch = fixBranchName(dir, planSteps(plan));
   if (git(dir, ['checkout', '-b', branch]).status !== 0) {
     report.skipped = `could not create branch ${branch}.`;
     log(`✖ Could not create branch ${branch}.`);
