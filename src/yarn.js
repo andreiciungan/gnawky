@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run, runAsync } from './scanners.js';
-import { makeFinding } from './finding.js';
+import { makeFinding, ghsaFromUrl } from './finding.js';
 import { PKG_NAME, PKG_VERSION } from './pm.js';
 import { writePackageJson, pinSpec } from './overrides.js';
 import {
@@ -233,6 +233,8 @@ export async function scanYarnAudit(dir) {
         description: `Vulnerable versions: ${a.vulnerable ?? 'unknown'}. Installed: ${installed.join('; ') || 'n/a'}.`,
         cwe: [a.adv.cwe ?? []].flat(),
         url: a.adv.url ?? null,
+        ghsa: a.adv.github_advisory_id ?? ghsaFromUrl(a.adv.url),
+        cves: a.adv.cves ?? [],
         fix: unpatched
           ? { type: 'manual', detail: 'No patched version published. Consider replacing the package, removing it, or mitigating how you use it.' }
           : fix,

@@ -14,9 +14,9 @@ import { makeFinding } from './finding.js';
 import { NEXT_REACT_TOOL } from './pm.js';
 import { satisfies, parse } from './semver.js';
 import { OUT_DIR, ensureOutDir } from './config.js';
+import { API, github, ApiError } from './github.js';
 
 const RSC_PACKAGES = ['react-server-dom-webpack', 'react-server-dom-turbopack'];
-const API = 'https://api.github.com';
 const SEVERITY = { critical: 'critical', high: 'high', medium: 'medium', moderate: 'medium', low: 'low' };
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
 
@@ -68,28 +68,6 @@ function saveCache(dir, cache) {
   } catch {
     /* the cache is only an optimization */
   }
-}
-
-class ApiError extends Error {}
-
-async function github(url) {
-  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'gnawky', 'X-GitHub-Api-Version': '2022-11-28' };
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-  if (token) headers.Authorization = `Bearer ${token}`;
-  let res;
-  try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
-  } catch (e) {
-    throw new ApiError(`could not reach the GitHub API (${e.cause?.code ?? e.name})`);
-  }
-  if (res.status === 404) return null;
-  if ((res.status === 403 || res.status === 429) && res.headers.get('x-ratelimit-remaining') === '0') {
-    throw new ApiError(token
-      ? 'GitHub API rate limit reached, try again later'
-      : 'GitHub API rate limit reached (60 requests/hour without a token); try later, or set GITHUB_TOKEN');
-  }
-  if (!res.ok) throw new ApiError(`GitHub API returned ${res.status} for ${url.replace(API, '')}`);
-  return res.json();
 }
 
 /** When the Next.js release was published, from its GitHub release (cached: it never changes). */
@@ -165,6 +143,8 @@ export async function scanNextBundledReact(dir) {
       findings.push(makeFinding({
         tool: NEXT_REACT_TOOL,
         ruleId: adv.ghsa_id,
+        ghsa: adv.ghsa_id,
+        cves: adv.cve_id ? [adv.cve_id] : [],
         severity: SEVERITY[adv.severity] ?? 'medium',
         title: `next (bundled React): ${adv.summary}`,
         package: 'next',

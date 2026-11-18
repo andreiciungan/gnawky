@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeFinding } from './finding.js';
+import { makeFinding, ghsaFromUrl } from './finding.js';
 import { packageManager, auditName, NEXT_REACT_TOOL } from './pm.js';
 import { usesNext, scanNextBundledReact } from './nextjs.js';
 import { scanYarnAudit } from './yarn.js';
@@ -168,6 +168,8 @@ export async function scanNpmAudit(dir, { fixes = true } = {}) {
           description: `Vulnerable versions: ${adv.range ?? 'unknown'}. Installed at: ${(v.nodes ?? []).slice(0, 3).join(', ') || 'n/a'}.`,
           cwe: adv.cwe ?? [],
           url: adv.url ?? null,
+          // npm audit doesn't report CVE IDs; the fix log looks them up when it needs them.
+          ghsa: ghsaFromUrl(adv.url),
           fix: overrides.get(pkg) ?? npmFix(v.fixAvailable, direct),
         }),
       );

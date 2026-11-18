@@ -12,12 +12,19 @@ export function rank(severity) {
 /**
  * Normalized finding shape shared by every scanner:
  * { fingerprint, tool, ruleId, severity, title, file, line, package,
- *   description, cwe[], url, fix: { type, detail, ... } }
+ *   description, cwe[], url, ghsa, cves[], fix: { type, detail, ... } }
+ * (ghsa and cves only for dependency advisories.)
  */
 export function makeFinding(f) {
   const key = [f.tool, f.ruleId, f.file ?? '', f.package ?? '', f.line ?? ''].join('|');
   const fingerprint = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
   return { cwe: [], line: null, package: null, url: null, ...f, fingerprint };
+}
+
+/** The GitHub advisory ID (GHSA-xxxx-xxxx-xxxx) in an advisory URL, or null. */
+export function ghsaFromUrl(url) {
+  const m = /GHSA(-[23456789cfghjmpqrvwx]{4}){3}/i.exec(url ?? '');
+  return m ? `GHSA${m[0].slice(4).toLowerCase()}` : null;
 }
 
 // ---- Ignore baseline (.gnawky-ignore.json, meant to be committed) ----
