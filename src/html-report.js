@@ -232,7 +232,7 @@ ${tri.length ? `<div class="claude"><button class="tile now-tile" id="fixnow" ar
 <ul class="scanners">${scanners}</ul>
 
 <h2>Findings <span class="muted" id="shown">(${groups.length})</span></h2>
-${groups.length < findings.length ? `<p class="muted">${findings.length} findings in ${groups.length} items: advisories fixed by changing the same package are grouped, since one upgrade fixes them all.</p>` : ''}
+${groups.length < findings.length ? `<p class="muted">${findings.length} findings in ${groups.length} items: advisories whose fix changes the same package are grouped, and each item says how many its upgrade really fixes.</p>` : ''}
 ${findings.length ? `<div class="controls">
 <input id="q" type="search" placeholder="Search title, package, file, rule, CWE…" aria-label="Search findings">
 <select id="tool" aria-label="Filter by tool"><option value="">All tools</option>${toolNames.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
