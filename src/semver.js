@@ -155,3 +155,30 @@ export function patchedCandidates(range) {
   }
   return [...new Set(found)].sort(compare);
 }
+
+/**
+ * The lowest version at or above `version` that is outside `range`, following the range's
+ * upper bounds: { version } for "<X" (X itself is fine), { after } for "<=X" (the first
+ * release after X, which this can't name), or null when the range has no upper bound
+ * (no fixed version known). Returns { version } unchanged when it is already outside.
+ */
+export function firstOutside(version, range) {
+  const sets = parseRange(range);
+  if (!sets || !valid(version)) return null;
+  let v = version;
+  for (let i = 0; i < 50; i++) {
+    const set = sets.find((s) => testSet(parse(v), s));
+    if (!set) return { version: v };
+    const uppers = set.filter(([op]) => op === '<' || op === '<=');
+    if (!uppers.length) return null;
+    // The tightest upper bound of this set decides where it ends.
+    const [op, bound] = uppers.sort(([, a], [, b]) => compare(a, b))[0];
+    if (op === '<=') {
+      // Another set may still cover the next release; that can't be checked without a version list.
+      return { after: bound };
+    }
+    if (compare(bound, v) <= 0) return null;
+    v = bound;
+  }
+  return null;
+}

@@ -231,6 +231,7 @@ export async function scanYarnAudit(dir) {
         package: name,
         file: 'yarn.lock',
         description: `Vulnerable versions: ${a.vulnerable ?? 'unknown'}. Installed: ${installed.join('; ') || 'n/a'}.`,
+        vulnerable: a.vulnerable ?? null,
         cwe: [a.adv.cwe ?? []].flat(),
         url: a.adv.url ?? null,
         ghsa: a.adv.github_advisory_id ?? ghsaFromUrl(a.adv.url),

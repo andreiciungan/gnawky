@@ -8,6 +8,7 @@ import { usesNext, scanNextBundledReact } from './nextjs.js';
 import { scanYarnAudit } from './yarn.js';
 import { scanAudit, AUDIT_TOOL } from './audit.js';
 import { npmOverrideFixes } from './overrides.js';
+import { markUnfixed } from './coverage.js';
 
 export const IS_WIN = process.platform === 'win32';
 // Tools installed as .cmd shims on Windows (need a shell there; only pass constant/validated args).
@@ -166,6 +167,7 @@ export async function scanNpmAudit(dir, { fixes = true } = {}) {
           package: pkg,
           file: 'package-lock.json',
           description: `Vulnerable versions: ${adv.range ?? 'unknown'}. Installed at: ${(v.nodes ?? []).slice(0, 3).join(', ') || 'n/a'}.`,
+          vulnerable: adv.range ?? null,
           cwe: adv.cwe ?? [],
           url: adv.url ?? null,
           // npm audit doesn't report CVE IDs; the fix log looks them up when it needs them.
@@ -186,11 +188,17 @@ export async function scanDependencies(dir) {
   const pm = packageManager(dir);
   if (pm === 'yarn') {
     if (!isAvailable('yarn')) return { name: 'yarn-audit', skipped: 'yarn not installed (npm install -g yarn)' };
-    return { name: 'yarn-audit', ...(await scanYarnAudit(dir)) };
+    return checkCoverage({ name: 'yarn-audit', ...(await scanYarnAudit(dir)) });
   }
   if (pm === 'yarn-berry') return { skipped: 'Yarn 2+ (Berry) lockfiles are not supported yet' };
   if (pm === 'pnpm') return { skipped: 'pnpm lockfiles are not supported yet' };
-  return scanNpmAudit(dir);
+  return checkCoverage(await scanNpmAudit(dir));
+}
+
+/** Advisories the suggested version doesn't fix get a manual fix that says what they need (see coverage.js). */
+function checkCoverage(res) {
+  if (res.findings) markUnfixed(res.findings);
+  return res;
 }
 
 // ----------------------------------------------------------------- gitleaks
