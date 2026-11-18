@@ -27,7 +27,7 @@ import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
 import { saveFixRecord, advisoryIds } from './fixlog.js';
 import {
-  groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes,
+  groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage,
 } from './groups.js';
 import { rcFile, isInstalled as isHookInstalled, install, uninstall, refresh as refreshHook } from './shellhook.js';
 import { hookTarget, isHookInstalled as isCommitHookOn, installHook, uninstallHook, LEFTHOOK_SNIPPET } from './githook.js';
@@ -133,8 +133,17 @@ function printGroup(g, triage, { max = 12 } = {}) {
       console.log(`    • ${x.fix.detail} ${c.gray('(')}${tag}${c.gray(')')}`);
     }
   }
-  const t = groupTriage(g, triage);
-  if (t) row("Claude's take", `${triageTag(t)} ${VERDICTS[t.verdict]}. ${t.reason} ${c.gray('(a suggestion; check it)')}`);
+  const takes = triageByPackage(g, triage);
+  if (takes.length === 1) {
+    const { t } = takes[0];
+    row("Claude's take", `${triageTag(t)} ${VERDICTS[t.verdict]}. ${t.reason} ${c.gray('(a suggestion; check it)')}`);
+  } else if (takes.length > 1) {
+    console.log(`  ${c.gray("Claude's take")} ${c.gray('(suggestions; check them)')}`);
+    for (const { package: p, t } of takes) {
+      const verdict = t.verdict === 'false-positive' ? '' : ` ${VERDICTS[t.verdict]}.`;
+      console.log(`    • ${c.bold(p)}: ${triageTag(t)}${verdict} ${t.reason}`);
+    }
+  }
   console.log(`\n  ${c.bold('Advisories')}`);
   for (const f of g.findings.slice(0, max)) {
     const ids = idsOf(f);
