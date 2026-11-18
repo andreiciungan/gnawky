@@ -1,6 +1,7 @@
 import { rank, SEVERITY_ORDER } from './finding.js';
 import { isDependencyFinding } from './pm.js';
 import { isAutoFixable } from './fix.js';
+import { highestNeeds, needsText } from './coverage.js';
 
 /**
  * Groups findings for display: dependency advisories fixed by changing the same package
@@ -40,7 +41,11 @@ export function groupFindings(findings) {
 
 export const isGroup = (g) => g.findings.length > 1;
 
-/** Other vulnerable packages a group's fix covers, e.g. "postcss (4)" in the next group, or ''. */
+/**
+ * Other vulnerable packages whose fix is this group's upgrade, e.g. "postcss (4)" in the next
+ * group, or ''. That is npm's expectation; whether the new next brings a fixed postcss can't be
+ * checked without the registry, and the audit after the fix shows it.
+ */
 export function alsoFixes(g) {
   const counts = new Map();
   for (const f of g.findings) if (f.package !== g.package) counts.set(f.package, (counts.get(f.package) ?? 0) + 1);
@@ -63,9 +68,21 @@ export function severityCounts(findings) {
 export function groupFixes(g) {
   const fixes = new Map();
   for (const f of g.findings) {
-    const key = `${f.fix?.type}|${f.fix?.detail}`;
+    // Advisories the same upgrade leaves open share one line, with the highest version they need.
+    const key = f.fix?.stillVulnerable ? `still|${f.fix.package}|${f.fix.after}` : `${f.fix?.type}|${f.fix?.detail}`;
     if (!fixes.has(key)) fixes.set(key, { fix: f.fix, auto: isAutoFixable(f), findings: [] });
     fixes.get(key).findings.push(f);
+  }
+  for (const x of fixes.values()) {
+    if (!x.fix?.stillVulnerable || x.findings.length < 2) continue;
+    const { package: pkg, after, upgrade } = x.fix;
+    const needs = highestNeeds(x.findings.map((f) => f.fix.needs));
+    const verb = /override|resolution/.test(upgrade) ? 'Forcing' : 'Upgrading';
+    x.fix = {
+      ...x.fix,
+      needs,
+      detail: `${verb} ${pkg} to ${after} doesn't fix these ${x.findings.length}. Fixing all of them needs ${needsText(pkg, needs)}.`,
+    };
   }
   return [...fixes.values()].sort((a, b) => b.auto - a.auto);
 }

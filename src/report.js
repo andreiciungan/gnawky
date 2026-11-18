@@ -60,7 +60,7 @@ function pushFinding(out, f, triage) {
 function pushGroup(out, g, triage) {
   out.push(`### [${g.severity.toUpperCase()}] ${groupTitle(g)} (${severityCounts(g.findings)})`, '');
   out.push(`- **Package:** \`${g.package}\``);
-  if (alsoFixes(g)) out.push(`- **Also covers:** ${alsoFixes(g)}, installed by \`${g.package}\` and fixed by the same change`);
+  if (alsoFixes(g)) out.push(`- **Also covers:** ${alsoFixes(g)}, installed by \`${g.package}\`; npm expects this upgrade to fix them (not checked)`);
   out.push(`- **Location:** ${[...new Set(g.findings.map((f) => `\`${f.file}\``))].join(', ')}`);
   const fixes = groupFixes(g);
   if (fixes.length === 1) {

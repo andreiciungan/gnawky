@@ -32,7 +32,9 @@ Run each command on its own: no `cd`, variables, pipes, `head` or `&&` around it
 
 ## Reading the results
 
-Findings come grouped into **items**, like in Gnawky's app: every dependency advisory fixed by changing the same package is one item (`next: 40 advisories`), and `alsoCovers` lists vulnerable packages that the same upgrade fixes (`postcss (4)`, installed by next). Other findings are items of one.
+Findings come grouped into **items**, like in Gnawky's app: every dependency advisory fixed by changing the same package is one item (`next: 40 advisories`), and `alsoCovers` lists vulnerable packages installed by it that npm expects the same upgrade to fix (`postcss (4)`, installed by next; not checked until the audit after the fix). Other findings are items of one.
+
+An item can have several `fixes`: an automatic one, and a manual one for advisories that the automatic upgrade's version is still vulnerable to (`doesn't fix these 23. Fixing all of them needs a release of next after 15.5.27`). Say both: how many the automatic fix covers and what the rest need. When the rest need a new major version, that is a separate, riskier decision (a major upgrade of the package in package.json, done by hand or by a later Gnawky version); explain it rather than hiding it.
 
 Summarize like this:
 1. One line per severity count and the number of items, and which scanners were skipped and why. If no scanner ran, say plainly that the result proves nothing.

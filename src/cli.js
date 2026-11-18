@@ -134,7 +134,7 @@ function printFindings(dir, result, triage) {
   if (result.tools.every((t) => t.status !== 'ran')) out('  No scanner ran, so "no findings" proves nothing.');
   for (const it of items) {
     out(`\n[${it.severity.toUpperCase()}] ${it.title}${it.count > 1 ? `  (${it.severities})` : ''}${it.location ? `  ${it.location}` : ''}`);
-    if (it.alsoCovers) out(`  Also covers: ${it.alsoCovers} (installed by ${it.package}, fixed by the same change)`);
+    if (it.alsoCovers) out(`  Also covers: ${it.alsoCovers} (installed by ${it.package}; npm expects this upgrade to fix them, not checked)`);
     for (const x of it.fixes) out(`  Fix${it.fixes.length > 1 ? ` (${x.findings})` : ''}: ${x.automatic ? '[automatic] ' : '[manual] '}${x.detail}`);
     for (const c of it.claude) {
       out(`  Claude${it.claude.length > 1 ? ` on ${c.package}` : ''}: ${VERDICTS[c.verdict]}${c.urgency ? `, ${URGENCIES[c.urgency]}` : ''}. ${c.reason}`);

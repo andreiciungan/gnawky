@@ -112,7 +112,7 @@ function groupCard(g, i, triage) {
     : `<ul>${fixes.map((x) => `<li>${fixBadge(x.fix?.type)} ${esc(x.fix?.detail)} <span class="muted">(${x.findings.length})</span></li>`).join('')}</ul>`;
   const rows = [
     ['Package', `<code>${esc(g.package)}</code>`],
-    alsoFixes(g) && ['Also covers', `${esc(alsoFixes(g))} <span class="muted">(installed by ${esc(g.package)}, fixed by the same change)</span>`],
+    alsoFixes(g) && ['Also covers', `${esc(alsoFixes(g))} <span class="muted">(installed by ${esc(g.package)}; npm expects this upgrade to fix them, not checked)</span>`],
     ['Location', [...new Set(g.findings.map((f) => f.file).filter(Boolean))].map((x) => `<code>${esc(x)}</code>`).join(' ') || 'n/a'],
     ['Suggested fix', fixHtml],
     takes.length && ["Claude's take", takes.length === 1

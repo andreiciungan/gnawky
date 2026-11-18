@@ -122,7 +122,7 @@ function printGroup(g, triage, { max = 12 } = {}) {
   console.log(`${sevTag(g.severity)} ${c.bold(groupTitle(g))}  ${c.gray(`(${severityCounts(g.findings)})`)}\n`);
   const row = (k, v) => v && console.log(`  ${c.gray(k.padEnd(14))}${v}`);
   row('Package', g.package);
-  row('Also covers', alsoFixes(g) && `${alsoFixes(g)}: installed by ${g.package}, fixed by the same change`);
+  row('Also covers', alsoFixes(g) && `${alsoFixes(g)}: installed by ${g.package}; npm expects this upgrade to fix them (not checked)`);
   const fixes = groupFixes(g);
   if (fixes.length === 1) {
     row('Suggested fix', `${fixes[0].fix.detail} ${c.gray(`(covers all ${n})`)}`);
