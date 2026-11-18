@@ -26,6 +26,7 @@ Run each command on its own: no `cd`, variables, pipes, `head` or `&&` around it
 | the report | `gnawky report` (add `--open` to open the HTML report in their browser) |
 | Claude triage | `gnawky triage --json [--severity …] [--sources …]`, then the same with `--yes` after they agree (see below) |
 | to ignore findings | `gnawky ignore <target>... --reason "…"` |
+| to fix findings | `gnawky fix <target>... --json` (a plan), then with `--yes` after they agree (see below) |
 
 `gnawky findings` and `gnawky report` use the last scan. If there is none, or the JSON says `"stale": true` (package.json or the lockfile changed since), run `gnawky scan --json` first and say you did.
 
@@ -58,13 +59,17 @@ Never pass `--yes` on your own initiative, and never triage while the project is
 
 ## Fixes
 
-Applying fixes stays in Gnawky's app for now, because it does the safe version: a new git branch, install scripts disabled, the project's test/build scripts run before and after, any upgrade that breaks them undone, and a log of the advisories fixed. When the user asks to fix something:
+`gnawky fix` applies dependency fixes the safe way, with the same code as Gnawky's app: a new git branch, install scripts disabled, optional verification with the project's own scripts, an audit afterwards, and a log of the advisories fixed. It works in three steps:
 
-1. Explain the change for each item they want fixed (from `fixes[]`): which package goes to which version, whether it is a major upgrade, and which other packages it also fixes.
-2. Suggest an order when there are several: upgrades of direct dependencies first (they often fix transitive advisories too), the riskiest (major) upgrades last or on their own, false positives last.
-3. Tell them to run `gnawky` in their terminal and choose Findings › Review & fix, which applies exactly these changes.
+1. **Plan.** `gnawky fix <target>... [--scripts …] --json` (targets as for ignore: package names, finding ids, GHSA/CVE IDs; or `--all`). It changes nothing and returns the steps in the order they will run, the branch name, which steps are major upgrades, `notAutomatic` items it can't fix, `blocked` (for example uncommitted changes), and `availableScripts`.
+2. **Agree with the user.** Explain each step (package → version, major or not, how many findings, what else it covers) and suggest an order or a split when it helps: direct upgrades first (they often fix transitive advisories too), risky major upgrades in their own run, items Claude judged false positives last or not at all. If the user wants a different order, run separate `gnawky fix` commands, keeping each branch before the next. Ask whether to verify with their scripts (`--scripts test,build` or `--scripts all`; add `--one-at-a-time` to test and undo each change separately): say clearly that this runs the project's own code. For "overrides"/"resolutions" steps, the plan shows the recommended pin; pass `--pin exact` or `--pin caret` only if the user wants the other one. If `blocked` is set, tell them why and stop.
+3. **Apply.** Only after the user agrees, run the same command with `--yes` (use a 10-minute timeout; installs and scripts can be slow). Report the result: each step's status (applied, skipped, reverted because it broke a script, failed), scripts before and after, new dependency problems, and the audit afterwards (fixed, still open, new). Then ask the user to choose:
+   - `gnawky fix --keep`: keeps the branch (uncommitted), saves the fixed advisories to `.gnawky/fixes/` (a Markdown list for a PR or ticket) and updates the results.
+   - `gnawky fix --undo`: back to the starting branch, deletes the fix branch.
 
-Do not run `npm install`, `yarn add`, `npm audit fix`, or edit `package.json` or the lockfile yourself unless the user explicitly asks you to do it by hand instead of using the app.
+   Don't choose for them. Until one of the two runs, no other fix can start. If a script broke, offer to investigate using the logs in `.gnawky/verify-after-*.log` before they decide.
+
+Never pass `--yes` on your own initiative. Don't commit the result unless the user asks; `--keep` prints the commit command. Don't run `npm install`, `yarn add`, `npm audit fix` or edit `package.json` or the lockfile yourself for a security fix: use `gnawky fix`. Fixes that aren't automatic (`notAutomatic`, code and secret findings) are explained and done by hand only with the user's approval of each change.
 
 ## Safety rules
 

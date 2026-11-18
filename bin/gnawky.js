@@ -26,6 +26,9 @@ Commands (run inside the project; all but scan use the last scan in .gnawky/):
                                  show what Claude triage would check; add --yes to run it
   gnawky ignore <id|GHSA|CVE|package>... --reason "why"
                                  ignore findings (a package ignores its whole grouped item)
+  gnawky fix <package|id|GHSA|CVE>... | --all [--scripts test,build|all] [--one-at-a-time] [--pin caret|exact]
+                                 show the fix plan; add --yes to apply it on a new git branch
+  gnawky fix --keep | --undo     keep the fix branch (and save the fixed advisories) or throw it away
   gnawky pre-commit              check dependencies in the staged lockfile (used by the git hook);
                                  fails only on new high/critical findings (--min-severity to change)
 
@@ -78,7 +81,7 @@ async function main() {
     return;
   }
   const sub = process.argv[2];
-  const COMMANDS = { findings: 'findingsCommand', report: 'reportCommand', triage: 'triageCommand', ignore: 'ignoreCommand' };
+  const COMMANDS = { findings: 'findingsCommand', report: 'reportCommand', triage: 'triageCommand', ignore: 'ignoreCommand', fix: 'fixCommand' };
   if (COMMANDS[sub]) {
     if (process.argv.slice(3).some((a) => a === '-h' || a === '--help')) { console.log(HELP); return; }
     const cli = await import('../src/cli.js');
