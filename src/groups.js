@@ -84,11 +84,24 @@ export function advisoryTitle(f) {
 export const idsOf = (f) => [f.ghsa, ...(f.cves ?? [])].filter(Boolean);
 
 const URGENCY_RANK = { now: 0, soon: 1, low: 2 };
+const triageKey = (t) => (t.verdict === 'false-positive' ? 3 : URGENCY_RANK[t.urgency] ?? 2);
+const mostUrgent = (findings, triage) => findings
+  .map((f) => triage.entries[f.fingerprint])
+  .filter(Boolean)
+  .sort((a, b) => triageKey(a) - triageKey(b))[0] ?? null;
+
 /** The most urgent triage entry among a group's findings (false positives count last). */
-export function groupTriage(g, triage) {
-  const key = (t) => (t.verdict === 'false-positive' ? 3 : URGENCY_RANK[t.urgency] ?? 2);
-  return g.findings
-    .map((f) => triage.entries[f.fingerprint])
-    .filter(Boolean)
-    .sort((a, b) => key(a) - key(b))[0] ?? null;
+export const groupTriage = (g, triage) => mostUrgent(g.findings, triage);
+
+/**
+ * Claude's take per vulnerable package in a group ({ package, t }), the group's own package
+ * first. Triage runs per vulnerable package, so a group that also covers other packages
+ * (postcss in the next group) can have a different verdict for each.
+ */
+export function triageByPackage(g, triage) {
+  const pkgs = [...new Set(g.findings.map((f) => f.package))]
+    .sort((a, b) => (b === g.package) - (a === g.package));
+  return pkgs
+    .map((p) => ({ package: p, t: mostUrgent(g.findings.filter((f) => f.package === p), triage) }))
+    .filter((x) => x.t);
 }

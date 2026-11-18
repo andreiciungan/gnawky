@@ -1,6 +1,6 @@
 import { SEVERITY_ORDER } from './finding.js';
 import { VERDICTS, URGENCIES } from './triage.js';
-import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes } from './groups.js';
+import { groupFindings, isGroup, groupFixes, groupTitle, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 
@@ -69,8 +69,13 @@ function pushGroup(out, g, triage) {
     out.push('- **Suggested fixes:**');
     for (const x of fixes) out.push(`  - (${x.fix.type}, ${x.findings.length} advisor${x.findings.length === 1 ? 'y' : 'ies'}) ${x.fix.detail}`);
   }
-  const t = groupTriage(g, triage);
-  if (t) out.push(`- **Claude's take (suggestion):** ${VERDICTS[t.verdict]}, ${URGENCIES[t.urgency]}. ${t.reason}`);
+  const takes = triageByPackage(g, triage);
+  const take = (t) => `${VERDICTS[t.verdict]}, ${URGENCIES[t.urgency]}. ${t.reason}`;
+  if (takes.length === 1) out.push(`- **Claude's take (suggestion):** ${take(takes[0].t)}`);
+  else if (takes.length > 1) {
+    out.push("- **Claude's take (suggestions):**");
+    for (const { package: p, t } of takes) out.push(`  - \`${p}\`: ${take(t)}`);
+  }
   out.push('');
   const multiFix = fixes.length > 1;
   out.push(`| Severity | Advisory | IDs | Details |${multiFix ? ' Fix |' : ''} ID |`, `|---|---|---|---|${multiFix ? '---|' : ''}---|`);

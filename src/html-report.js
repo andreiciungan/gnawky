@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { SEVERITY_ORDER } from './finding.js';
 import { VERDICTS, URGENCIES } from './triage.js';
-import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes } from './groups.js';
+import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
 // Self-contained HTML report: no external CSS, JS, fonts or images, so it opens
 // offline and viewing it never sends anything anywhere. Every value comes from
@@ -100,9 +100,12 @@ ${dl(findingRows(f, t))}
 </details>`;
 }
 
+const takeHtml = (t) => `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`;
+
 /** One card per package: the shared fix once, then each advisory as its own expandable row. */
 function groupCard(g, i, triage) {
   const t = groupTriage(g, triage);
+  const takes = triageByPackage(g, triage);
   const fixes = groupFixes(g);
   const fixHtml = fixes.length === 1
     ? `${fixBadge(fixes[0].fix?.type)} ${esc(fixes[0].fix?.detail)} <span class="muted">(all ${g.findings.length})</span>`
@@ -112,7 +115,9 @@ function groupCard(g, i, triage) {
     alsoFixes(g) && ['Also covers', `${esc(alsoFixes(g))} <span class="muted">(installed by ${esc(g.package)}, fixed by the same change)</span>`],
     ['Location', [...new Set(g.findings.map((f) => f.file).filter(Boolean))].map((x) => `<code>${esc(x)}</code>`).join(' ') || 'n/a'],
     ['Suggested fix', fixHtml],
-    t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
+    takes.length && ["Claude's take", takes.length === 1
+      ? takeHtml(takes[0].t)
+      : `<ul>${takes.map(({ package: p, t: x }) => `<li><code>${esc(p)}</code> ${takeHtml(x)}</li>`).join('')}</ul>`],
   ].filter((r) => r && r[1]);
   const advisories = g.findings.map((f) => `<details class="adv sev-${esc(f.severity)}">
 <summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(advisoryTitle(f))}</span><span class="meta">${idsOf(f).map(esc).join(' · ')}</span></summary>
