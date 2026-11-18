@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { SEVERITY_ORDER } from './finding.js';
 import { VERDICTS, URGENCIES } from './triage.js';
+import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes } from './groups.js';
 
 // Self-contained HTML report: no external CSS, JS, fonts or images, so it opens
 // offline and viewing it never sends anything anywhere. Every value comes from
@@ -51,15 +52,22 @@ function triageBadges(t) {
   return `<span class="tri tri-${v}">${esc(VERDICTS[v])}</span>${v === 'false-positive' ? '' : `<span class="tri urg-${u}">${esc(URGENCIES[u])}</span>`}`;
 }
 
-function findingCard(f, i, triage) {
-  const t = triage.entries[f.fingerprint];
-  const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : null;
+function searchText(f, t) {
+  return [f.title, f.tool, f.ruleId, f.file, f.package, f.description, f.fix?.detail, t?.reason, f.ghsa, ...(f.cves ?? []), ...(f.cwe ?? [])].join(' ').toLowerCase();
+}
+
+const reference = (f) => {
   const url = safeUrl(f.url);
-  const search = [f.title, f.tool, f.ruleId, f.file, f.package, f.description, f.fix?.detail, t?.reason, ...(f.cwe ?? [])].join(' ').toLowerCase();
-  const rows = [
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : f.url ? esc(f.url) : null;
+};
+
+function findingRows(f, t, { inGroup = false } = {}) {
+  const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : null;
+  return [
     ['Tool / rule', `${esc(f.tool)} / <code>${esc(f.ruleId)}</code>`],
-    f.package && ['Package', `<code>${esc(f.package)}</code>`],
+    !inGroup && f.package && ['Package', `<code>${esc(f.package)}</code>`],
     ['Location', loc ? `<code>${esc(loc)}</code>` : 'n/a'],
+    inGroup && idsOf(f).length && ['IDs', idsOf(f).map((x) => `<code>${esc(x)}</code>`).join(' ')],
     f.cwe?.length && ['CWE', f.cwe.map(esc).join(', ')],
     f.description && ['Details', esc(f.description)],
     ['Suggested fix', `${fixBadge(f.fix?.type)} ${esc(f.fix?.detail)}`],
@@ -68,13 +76,54 @@ function findingCard(f, i, triage) {
     f.audit?.conditions.length && ['Conditions', `<ul>${f.audit.conditions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`],
     f.audit?.trace.length && ['Trace', `<ol class="trace">${f.audit.trace.map((x) => `<li><b>${esc(x.kind)}</b> <code>${esc(x.file)}:${esc(x.line)}</code> ${esc(x.description)}</li>`).join('')}</ol>`],
     f.audit && ['Full report', `<code>${esc(f.audit.runDir)}</code>`],
-    t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
-    ['Reference', url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>` : f.url ? esc(f.url) : null],
+    !inGroup && t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
+    ['Reference', reference(f)],
     ['ID', `<code>${esc(f.fingerprint)}</code>`],
   ].filter((r) => r && r[1]);
-  return `<details class="finding" data-sev="${esc(f.severity)}" data-tool="${esc(f.tool)}" data-verdict="${t ? esc(t.verdict) : 'none'}" data-urgency="${t ? esc(t.urgency) : 'none'}" data-search="${esc(search)}"${i < 3 ? ' open' : ''}>
+}
+
+const dl = (rows) => `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
+
+/** The filter and sort attributes every card carries (a group matches a severity or tool if any of its findings does). */
+function cardAttrs(sev, list, t, search, open) {
+  const sevs = [...new Set(list.map((f) => f.severity))].join(' ');
+  const tools = [...new Set(list.map((f) => f.tool))].join(' ');
+  return `class="finding sev-${esc(sev)}" data-sev="${esc(sev)}" data-sevs="${esc(sevs)}" data-tools="${esc(tools)}" data-verdict="${t ? esc(t.verdict) : 'none'}" data-urgency="${t ? esc(t.urgency) : 'none'}" data-search="${esc(search)}"${open ? ' open' : ''}`;
+}
+
+function findingCard(f, i, triage) {
+  const t = triage.entries[f.fingerprint];
+  const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : null;
+  return `<details ${cardAttrs(f.severity, [f], t, searchText(f, t), i < 3)}>
 <summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(f.title)}</span>${t ? triageBadges(t) : ''}<span class="meta">${esc(f.tool)}${loc ? ` · ${esc(loc)}` : ''}</span></summary>
-<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+${dl(findingRows(f, t))}
+</details>`;
+}
+
+/** One card per package: the shared fix once, then each advisory as its own expandable row. */
+function groupCard(g, i, triage) {
+  const t = groupTriage(g, triage);
+  const fixes = groupFixes(g);
+  const fixHtml = fixes.length === 1
+    ? `${fixBadge(fixes[0].fix?.type)} ${esc(fixes[0].fix?.detail)} <span class="muted">(all ${g.findings.length})</span>`
+    : `<ul>${fixes.map((x) => `<li>${fixBadge(x.fix?.type)} ${esc(x.fix?.detail)} <span class="muted">(${x.findings.length})</span></li>`).join('')}</ul>`;
+  const rows = [
+    ['Package', `<code>${esc(g.package)}</code>`],
+    alsoFixes(g) && ['Also covers', `${esc(alsoFixes(g))} <span class="muted">(installed by ${esc(g.package)}, fixed by the same change)</span>`],
+    ['Location', [...new Set(g.findings.map((f) => f.file).filter(Boolean))].map((x) => `<code>${esc(x)}</code>`).join(' ') || 'n/a'],
+    ['Suggested fix', fixHtml],
+    t && ["Claude's take", `${triageBadges(t)} ${esc(t.reason)} <span class="muted">(suggestion, ${esc(String(t.date ?? '').slice(0, 10))})</span>`],
+  ].filter((r) => r && r[1]);
+  const advisories = g.findings.map((f) => `<details class="adv sev-${esc(f.severity)}">
+<summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(advisoryTitle(f))}</span><span class="meta">${idsOf(f).map(esc).join(' · ')}</span></summary>
+${dl(findingRows(f, null, { inGroup: true }))}
+</details>`).join('\n');
+  const search = g.findings.map((f) => searchText(f, triage.entries[f.fingerprint])).join(' ');
+  const tools = [...new Set(g.findings.map((f) => f.tool))].join(', ');
+  return `<details ${cardAttrs(g.severity, g.findings, t, search, i < 3)}>
+<summary><span class="sev sev-${esc(g.severity)}">${esc(g.severity)}</span><span class="title">${esc(groupTitle(g))}</span>${t ? triageBadges(t) : ''}<span class="meta">${esc(severityCounts(g.findings))} · ${esc(tools)}</span></summary>
+${dl(rows)}
+<div class="advs"><div class="advs-h">Advisories</div>${advisories}</div>
 </details>`;
 }
 
@@ -84,6 +133,7 @@ export function renderHtml({ target, date, findings, tools, ignoredCount, minSev
   const dateText = isNaN(when) ? String(date) : when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
   const counts = SEVERITY_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length]);
   const toolNames = [...new Set(findings.map((f) => f.tool))];
+  const groups = groupFindings(findings);
   const noneRan = tools.every((t) => t.status !== 'ran');
   const tri = findings.map((f) => triage.entries[f.fingerprint]).filter(Boolean);
   const fixNow = tri.filter((t) => t.verdict !== 'false-positive' && t.urgency === 'now').length;
@@ -149,11 +199,18 @@ ul.scanners li{padding:8px 14px;border-top:1px solid var(--border)}ul.scanners l
 .urg-soon{background:color-mix(in srgb,var(--medium) 20%,transparent);color:var(--medium)}
 .claude{display:flex;gap:14px;align-items:center;margin-top:8px}.claude p{margin:0;color:var(--muted);font-size:14px}
 .now-tile{--c:var(--critical);flex:0 0 190px}
-.finding dd ul,.finding dd ol{margin:0;padding-left:18px}.trace li{margin-bottom:4px}
+.finding dd ul,.finding dd ol{margin:0;padding-left:18px}
+.advs{padding:0 14px 14px}.advs-h{color:var(--muted);margin:4px 0 6px}
+.adv{border:1px solid var(--border);border-left:3px solid var(--c);border-radius:6px;margin-bottom:6px}
+.adv summary{cursor:pointer;padding:7px 10px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;list-style:none}
+.adv summary::-webkit-details-marker{display:none}
+.adv .title{flex:1;min-width:200px}.adv .meta{color:var(--muted);font-size:13px}
+.adv dl{display:grid;grid-template-columns:118px 1fr;gap:6px 14px;margin:0;padding:4px 10px 10px;border-top:1px solid var(--border)}
+.adv dt{color:var(--muted);padding-top:6px}.adv dd{margin:0;padding-top:6px;overflow-wrap:anywhere}.adv a{color:var(--accent)}.trace li{margin-bottom:4px}
 .empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel);border:1px dashed var(--border);border-radius:10px}
 footer{margin-top:40px;font-size:13px;color:var(--muted)}
 @media (max-width:640px){.tiles{grid-template-columns:repeat(3,1fr)}.claude{flex-direction:column;align-items:stretch}.now-tile{flex:none}.finding dl{grid-template-columns:1fr}.finding dt{padding-top:10px}.finding dd{padding-top:0}}
-@media print{.logo-light{display:block!important}.logo-dark{display:none!important}body{background:#fff;color:#000}.controls{display:none}.finding{break-inside:avoid}.finding:not([open]) dl{display:block}}
+@media print{.adv{break-inside:avoid}.adv:not([open]) dl{display:block}.logo-light{display:block!important}.logo-dark{display:none!important}body{background:#fff;color:#000}.controls{display:none}.finding{break-inside:avoid}.finding:not([open]) dl{display:block}}
 </style>
 </head>
 <body>
@@ -169,7 +226,8 @@ ${tri.length ? `<div class="claude"><button class="tile now-tile" id="fixnow" ar
 <h2>Scanners</h2>
 <ul class="scanners">${scanners}</ul>
 
-<h2>Findings <span class="muted" id="shown">(${findings.length})</span></h2>
+<h2>Findings <span class="muted" id="shown">(${groups.length})</span></h2>
+${groups.length < findings.length ? `<p class="muted">${findings.length} findings in ${groups.length} items: advisories fixed by changing the same package are grouped, since one upgrade fixes them all.</p>` : ''}
 ${findings.length ? `<div class="controls">
 <input id="q" type="search" placeholder="Search title, package, file, rule, CWE…" aria-label="Search findings">
 <select id="tool" aria-label="Filter by tool"><option value="">All tools</option>${toolNames.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
@@ -177,19 +235,21 @@ ${tri.length ? `<select id="verdict" aria-label="Filter by Claude's verdict"><op
 <select id="order" aria-label="Sort"><option value="sev">Sort: severity</option><option value="claude">Sort: Claude's urgency</option></select>` : ''}
 <select id="toggle" aria-label="Expand or collapse"><option value="">Expand…</option><option value="open">Expand all</option><option value="close">Collapse all</option></select>
 </div>
-<div id="list">${findings.map((f, i) => findingCard(f, i, triage)).join('\n')}</div>
+<div id="list">${groups.map((g, i) => (isGroup(g) ? groupCard(g, i, triage) : findingCard(g.lead, i, triage))).join('\n')}</div>
 <div class="empty-state" id="nomatch" hidden>No findings match the filters.</div>` : '<div class="empty-state">No findings at or above the selected severity.</div>'}
 
 <footer>Generated by Gnawky. This report lists your project's weak spots: keep it private. Secrets are redacted and code snippets are never included.</footer>
 </main>
 <script>
 (function(){
-  var cards=[].slice.call(document.querySelectorAll('.finding'));if(!cards.length)return;
+  var cards=[].slice.call(document.querySelectorAll('.finding'));
+  function has(list,v){return (' '+list+' ').indexOf(' '+v+' ')!==-1;}
+  function anySev(c){var r=false;sevs.forEach(function(s){if(has(c.dataset.sevs,s))r=true;});return r;}if(!cards.length)return;
   var q=document.getElementById('q'),tool=document.getElementById('tool'),verdict=document.getElementById('verdict'),order=document.getElementById('order'),now=document.getElementById('fixnow'),list=document.getElementById('list'),sevs=new Set(),onlyNow=false;
   function apply(){
     var text=q.value.trim().toLowerCase(),t=tool.value,v=verdict?verdict.value:'',n=0;
     cards.forEach(function(c){
-      var show=(!sevs.size||sevs.has(c.dataset.sev))&&(!t||c.dataset.tool===t)&&(!v||c.dataset.verdict===v)&&(!onlyNow||(c.dataset.urgency==='now'&&c.dataset.verdict!=='false-positive'))&&(!text||c.dataset.search.indexOf(text)!==-1);
+      var show=(!sevs.size||anySev(c))&&(!t||has(c.dataset.tools,t))&&(!v||c.dataset.verdict===v)&&(!onlyNow||(c.dataset.urgency==='now'&&c.dataset.verdict!=='false-positive'))&&(!text||c.dataset.search.indexOf(text)!==-1);
       c.hidden=!show;if(show)n++;
     });
     document.getElementById('shown').textContent='('+n+(n===cards.length?'':' of '+cards.length)+')';

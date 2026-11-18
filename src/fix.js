@@ -83,7 +83,18 @@ export function describePlan(plan) {
   const lines = planSteps(plan).map((s) => (s.kind === 'audit-fix'
     ? `npm audit fix for ${s.findings.length} finding(s): non-breaking updates within your version ranges (may also update other packages)`
     : `${s.label}${s.major ? '  (major version: may break your code)' : ''}`));
-  for (const { finding, reason } of plan.ignores) lines.push(`ignore "${finding.title}" (reason: ${reason})`);
+  // Advisories of one package ignored together (from a grouped review) get one line.
+  const ignores = new Map();
+  for (const { finding, reason } of plan.ignores) {
+    const key = finding.package ? `${finding.package}\0${reason}` : finding.fingerprint;
+    if (!ignores.has(key)) ignores.set(key, { finding, reason, n: 0 });
+    ignores.get(key).n++;
+  }
+  for (const { finding, reason, n } of ignores.values()) {
+    lines.push(n > 1
+      ? `ignore ${n} advisories for ${finding.package} (reason: ${reason})`
+      : `ignore "${finding.title}" (reason: ${reason})`);
+  }
   return lines;
 }
 

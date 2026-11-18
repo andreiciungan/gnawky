@@ -26,6 +26,9 @@ import {
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
 import { saveFixRecord, advisoryIds } from './fixlog.js';
+import {
+  groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes,
+} from './groups.js';
 import { rcFile, isInstalled as isHookInstalled, install, uninstall, refresh as refreshHook } from './shellhook.js';
 import { hookTarget, isHookInstalled as isCommitHookOn, installHook, uninstallHook, LEFTHOOK_SNIPPET } from './githook.js';
 import { recommendPin, pinSpec } from './overrides.js';
@@ -112,6 +115,43 @@ function printFinding(f, t) {
   console.log();
 }
 
+/** A group of advisories for one package: the shared fix once, then one line per advisory. */
+function printGroup(g, triage, { max = 12 } = {}) {
+  if (!isGroup(g)) return printFinding(g.lead, triage.entries[g.lead.fingerprint]);
+  const n = g.findings.length;
+  console.log(`${sevTag(g.severity)} ${c.bold(groupTitle(g))}  ${c.gray(`(${severityCounts(g.findings)})`)}\n`);
+  const row = (k, v) => v && console.log(`  ${c.gray(k.padEnd(14))}${v}`);
+  row('Package', g.package);
+  row('Also covers', alsoFixes(g) && `${alsoFixes(g)}: installed by ${g.package}, fixed by the same change`);
+  const fixes = groupFixes(g);
+  if (fixes.length === 1) {
+    row('Suggested fix', `${fixes[0].fix.detail} ${c.gray(`(covers all ${n})`)}`);
+  } else {
+    console.log(`  ${c.gray('Suggested fix')}`);
+    for (const x of fixes) {
+      const tag = x.auto ? c.green(`automatic, ${x.findings.length}`) : c.yellow(`manual, ${x.findings.length}`);
+      console.log(`    • ${x.fix.detail} ${c.gray('(')}${tag}${c.gray(')')}`);
+    }
+  }
+  const t = groupTriage(g, triage);
+  if (t) row("Claude's take", `${triageTag(t)} ${VERDICTS[t.verdict]}. ${t.reason} ${c.gray('(a suggestion; check it)')}`);
+  console.log(`\n  ${c.bold('Advisories')}`);
+  for (const f of g.findings.slice(0, max)) {
+    const ids = idsOf(f);
+    const manual = fixes.length > 1 && !isAutoFixable(f) ? c.yellow(' (manual)') : '';
+    console.log(`    ${sevTag(f.severity)} ${advisoryTitle(f)}${manual}${ids.length ? `  ${c.gray(ids.join(', '))}` : ''}`);
+  }
+  if (n > max) console.log(c.gray(`    … and ${n - max} more (see Browse findings or the report)`));
+  console.log();
+}
+
+/** Label for the fix option of a group: how many of its findings it fixes. */
+function fixLabel(g, base) {
+  const auto = g.findings.filter(isAutoFixable).length;
+  if (!isGroup(g) || !auto) return base;
+  return `${base} (${auto === g.findings.length ? `all ${auto}` : `${auto} of ${g.findings.length}, the rest need a manual fix`})`;
+}
+
 function dropFromResult(s, fingerprints) {
   const set = new Set(fingerprints);
   const before = s.result.findings.length;
@@ -154,10 +194,10 @@ async function scanScreen(s) {
 async function viewScreen(s) {
   // Where the user was (page and finding), kept on `s` so it survives opening a
   // finding and leaving the screen; a new scan starts again at the top.
-  s.browse ??= { page: 0, fingerprint: null };
+  s.browse ??= { page: 0, key: null };
   for (;;) {
     header(s);
-    const list = s.result.findings;
+    const list = groupFindings(s.result.findings);
     if (!list.length) {
       console.log(c.green('No findings to show.'));
       await pause();
@@ -165,13 +205,17 @@ async function viewScreen(s) {
     }
     const size = 9;
     const pages = Math.ceil(list.length / size);
-    const at = list.findIndex((f) => f.fingerprint === s.browse.fingerprint);
+    const at = list.findIndex((g) => g.key === s.browse.key);
     // Back from a finding that is still listed: its page. Otherwise (e.g. it was ignored) the same page number.
     const page = Math.min(at >= 0 && s.browse.fromDetail ? Math.floor(at / size) : s.browse.page, pages - 1);
     const items = list.slice(page * size, (page + 1) * size);
 
-    const options = items.map((f, i) => ({
-      label: `${sevTag(f.severity)} ${f.title}  ${triageTag(s.triage.entries[f.fingerprint])} ${c.gray(loc(f))}`.replace(/  +/g, '  '), value: f, number: page * size + i + 1,
+    const options = items.map((g, i) => ({
+      label: isGroup(g)
+        ? `${sevTag(g.severity)} ${groupTitle(g)}  ${c.gray(`(${severityCounts(g.findings)})`)}  ${triageTag(groupTriage(g, s.triage))}`.replace(/  +/g, '  ')
+        : `${sevTag(g.severity)} ${g.lead.title}  ${triageTag(s.triage.entries[g.lead.fingerprint])} ${c.gray(loc(g.lead))}`.replace(/  +/g, '  '),
+      value: g,
+      number: page * size + i + 1,
     }));
     options.push({ static: '' });
     if (pages > 1) {
@@ -182,10 +226,12 @@ async function viewScreen(s) {
     options.push({ label: 'Back', value: null });
 
     const first = page * size + 1;
+    const what = list.length === s.result.findings.length ? 'Findings' : 'Items';
+    const grouped = what === 'Items' ? c.gray(`, ${s.result.findings.length} findings (advisories grouped by the package their fix changes)`) : '';
     const title = pages > 1
-      ? `Findings ${first}-${first + items.length - 1} of ${list.length}  ${c.gray(`(page ${page + 1} of ${pages})`)}. Choose one for details`
-      : `Findings (${list.length}). Choose one for details`;
-    const cursor = items.findIndex((f) => f.fingerprint === s.browse.fingerprint);
+      ? `${what} ${first}-${first + items.length - 1} of ${list.length}${grouped}  ${c.gray(`(page ${page + 1} of ${pages})`)}. Choose one for details`
+      : `${what} (${list.length})${grouped}. Choose one for details`;
+    const cursor = items.findIndex((g) => g.key === s.browse.key);
     const pick = await select(title, options, {
       initial: cursor >= 0 ? cursor : null,
       keys: pages > 1 ? { right: 'next', left: 'prev' } : {},
@@ -194,13 +240,58 @@ async function viewScreen(s) {
 
     s.browse.fromDetail = false;
     if (pick === 'next' || pick === 'prev') {
-      s.browse = { page: Math.min(Math.max(0, page + (pick === 'next' ? 1 : -1)), pages - 1), fingerprint: null };
+      s.browse = { page: Math.min(Math.max(0, page + (pick === 'next' ? 1 : -1)), pages - 1), key: null };
       continue;
     }
     s.browse.page = page;
     if (!pick) return;
-    s.browse = { page, fingerprint: pick.fingerprint, fromDetail: true };
-    await detailScreen(s, pick);
+    s.browse = { page, key: pick.key, fromDetail: true };
+    if (isGroup(pick)) await groupScreen(s, pick.key);
+    else await detailScreen(s, pick.lead);
+  }
+}
+
+/** One package's advisories: act on all of them at once, or open one. */
+async function groupScreen(s, key) {
+  for (;;) {
+    const g = groupFindings(s.result.findings).find((x) => x.key === key);
+    if (!g) return;
+    if (!isGroup(g)) return detailScreen(s, g.lead);
+    header(s);
+    printGroup(g, s.triage);
+    const auto = g.findings.filter(isAutoFixable);
+    const action = await select('What do you want to do?', [
+      { label: auto.length ? fixLabel(g, 'Fix automatically') : 'Fix automatically (not available, see suggested fix)', value: 'fix', disabled: !auto.length },
+      { label: `Ask Claude to explain these ${g.findings.length} advisories and propose a fix`, value: 'claude' },
+      { label: `Ignore all ${g.findings.length} (needs a reason)`, value: 'ignore' },
+      { label: 'Open one advisory', value: 'one' },
+      { label: 'Back', value: null },
+    ]);
+    if (!action) return;
+    if (action === 'fix') {
+      const plan = emptyPlan();
+      for (const f of auto) addFixToPlan(plan, f);
+      return confirmAndApply(s, plan);
+    }
+    if (action === 'claude') return claudeScreen(s, null, g);
+    if (action === 'ignore') {
+      const reason = await ask('Why are these safe to ignore? (leave empty to cancel) ');
+      if (!reason) continue;
+      addIgnores(s.dir, g.findings.map((finding) => ({ finding, reason })));
+      dropFromResult(s, g.findings.map((f) => f.fingerprint));
+      console.log(c.green(`✔ Ignored ${g.findings.length} advisories. You can restore them from "Ignored findings".`));
+      console.log(c.gray('  New advisories for this package will still show up.'));
+      await pause();
+      return;
+    }
+    if (action === 'one') {
+      header(s);
+      const pick = await select(`${g.package}: choose an advisory`, [
+        ...g.findings.map((f) => ({ label: `${sevTag(f.severity)} ${advisoryTitle(f)}  ${c.gray(idsOf(f).join(', '))}`, value: f })),
+        { label: 'Back', value: null },
+      ]);
+      if (pick) await detailScreen(s, pick);
+    }
   }
 }
 
@@ -232,22 +323,25 @@ async function detailScreen(s, f) {
 
 async function reviewScreen(s, { claudeOrder = false } = {}) {
   const plan = emptyPlan();
-  const list = claudeOrder ? triageOrder(s.result.findings, s.triage) : [...s.result.findings];
-  for (const [i, f] of list.entries()) {
+  const list = groupFindings(claudeOrder ? triageOrder(s.result.findings, s.triage) : [...s.result.findings]);
+  for (const [i, g] of list.entries()) {
     header(s);
-    console.log(c.gray(`Finding ${i + 1} of ${list.length}   ·   planned so far: ${planSize(plan)} change(s)\n`));
-    printFinding(f, s.triage.entries[f.fingerprint]);
+    const what = list.length === s.result.findings.length ? 'Finding' : 'Item';
+    console.log(c.gray(`${what} ${i + 1} of ${list.length}   ·   planned so far: ${describePlan(plan).length} change(s)\n`));
+    printGroup(g, s.triage);
+    const auto = g.findings.filter(isAutoFixable);
+    const all = isGroup(g) ? ` all ${g.findings.length}` : '';
     const choice = await select('Your decision', [
-      { label: 'Fix automatically', value: 'fix', disabled: !isAutoFixable(f) },
+      { label: fixLabel(g, 'Fix automatically'), value: 'fix', disabled: !auto.length },
       { label: 'Skip for now', value: 'skip' },
-      { label: 'Ignore (needs a reason)', value: 'ignore' },
+      { label: `Ignore${all} (needs a reason)`, value: 'ignore' },
       { label: 'Stop reviewing', value: 'stop' },
     ]);
     if (choice === null || choice === 'stop') break;
-    if (choice === 'fix') addFixToPlan(plan, f);
+    if (choice === 'fix') for (const f of auto) addFixToPlan(plan, f);
     if (choice === 'ignore') {
       const reason = await ask('Why is this safe to ignore? (leave empty to skip) ');
-      if (reason) plan.ignores.push({ finding: f, reason });
+      if (reason) for (const f of g.findings) plan.ignores.push({ finding: f, reason });
     }
   }
   if (!planSize(plan)) {
@@ -546,11 +640,13 @@ function printFixLog(s, { json, md, record }) {
   console.log(c.gray(`  Saved to ${path.relative(s.dir, md)} (for a PR or ticket) and ${path.relative(s.dir, json)}\n`));
 }
 
-function buildClaudePrompt(s, f) {
+function buildClaudePrompt(s, f, g = null) {
   const secretFiles = [...new Set(s.result.findings.filter((x) => x.tool === 'gitleaks').map((x) => x.file))];
-  const focus = f
-    ? `Focus only on the finding with fingerprint ${f.fingerprint} ("${f.title}").`
-    : 'Go through the findings, most severe first.';
+  const focus = g
+    ? `Focus only on the ${g.findings.length} advisories for the package ${g.package} (fingerprints ${g.findings.map((x) => x.fingerprint).join(', ')}). They usually share one fix: treat them together, and say if any of them needs something different.`
+    : f
+      ? `Focus only on the finding with fingerprint ${f.fingerprint} ("${f.title}").`
+      : 'Go through the findings, most severe first.';
   return `# Security fix session (started by Gnawky)
 
 Read \`${OUT_DIR}/findings.json\`: it contains the results of a security scan of this project.
@@ -590,8 +686,8 @@ Rules. Follow them strictly:
 `;
 }
 
-async function claudeScreen(s, f) {
-  await launchClaude(s, buildClaudePrompt(s, f));
+async function claudeScreen(s, f, g = null) {
+  await launchClaude(s, buildClaudePrompt(s, f, g));
 }
 
 /** Starts Claude Code in the project with a task file, after a privacy notice. */
