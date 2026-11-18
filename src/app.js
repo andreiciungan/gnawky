@@ -14,7 +14,7 @@ import {
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
   loadTriage, runTriage, triageItems, batchCount, triageOrder, secretDenyRules, VERDICTS, URGENCIES,
-  findingSource, TRIAGE_SOURCES, MAX_PARALLEL,
+  findingSource, TRIAGE_SOURCES, MAX_PARALLEL, triageEstimate,
 } from './triage.js';
 import {
   AUDIT_TOOL, PLUGIN_DIR, latestAudit, auditCounts, nextAuditRun, recordAuditRun, buildAuditTask, scanAudit,
@@ -758,11 +758,6 @@ function triaged(s) {
 const SEVERITIES_DESC = ['critical', 'high', 'medium', 'low', 'info'];
 
 /** Rough wall-clock estimate: 1-4 minutes per Claude run, `parallel` runs at once. */
-function triageEstimate(batches, parallel) {
-  const rounds = Math.ceil(batches / Math.max(1, parallel));
-  const [lo, hi] = [rounds, rounds * 4];
-  return hi < 2 ? 'about a minute' : `about ${lo}–${hi} min`;
-}
 
 /** Severity and source checkboxes. Resolves with { severities, sources }, or null. */
 async function chooseTriageFilter(s, pool) {

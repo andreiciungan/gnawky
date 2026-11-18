@@ -79,6 +79,13 @@ export const findingSource = (f) => (isDependencyFinding(f) ? 'dependencies' : f
 /** At most this many Claude runs at the same time. */
 export const MAX_PARALLEL = 3;
 
+/** Rough wall-clock time for a triage run, for showing before it starts. */
+export function triageEstimate(batches, parallel) {
+  const rounds = Math.ceil(batches / Math.max(1, parallel));
+  const [lo, hi] = [rounds, rounds * 4];
+  return hi < 2 ? 'about a minute' : `about ${lo}–${hi} min`;
+}
+
 export function batchCount(items) {
   return Math.ceil(items.length / BATCH_SIZE);
 }

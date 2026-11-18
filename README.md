@@ -100,6 +100,17 @@ What would you like to do?
 5. **Settings**: minimum severity, offline mode, scanners on/off, semgrep rules, and whether semgrep skips test and mock files (`__mocks__`, `__tests__`, `fixtures`, `test(s)/`, `*.spec.*`, `*.test.*`; on by default, much faster on big projects; gitleaks still scans them for secrets). Saved per project in `.gnawky/config.json`.
 6. **Tools & scanners**: shows which scanners are missing and installs them (Homebrew/pipx) if you want.
 
+Commands that work on the last scan in `.gnawky/` (the plugin's skill uses them; run them inside the project):
+
+```bash
+gnawky scan [--json]                       # scan, then list the findings grouped like the app
+gnawky findings [--json]                   # the last scan's grouped findings, with Claude's verdicts
+gnawky report [--open]                     # rewrite both reports, optionally open the HTML one
+gnawky triage [--severity critical,high] [--sources dependencies,code,secrets] [--all] [--parallel 3]
+                                           # shows what Claude triage would send; add --yes to run it
+gnawky ignore <id|GHSA|CVE|package>... --reason "why"   # a package ignores its whole grouped item
+```
+
 Headless mode for CI and scripts:
 
 ```bash
@@ -193,9 +204,19 @@ Fix them (gnawky → Findings), ignore them with a reason in gnawky, or commit a
 
 ## Claude Code plugin
 
-The repo is also a plugin (`.claude-plugin/plugin.json`) with:
+The repo is also a plugin (`.claude-plugin/plugin.json`) named `gnawky`, so you can talk to Gnawky in a Claude Code session:
 
-- `/security-scan`: runs the scanner, explains each finding, recommends fixes, and asks before changing anything
+```
+gnawky find any security issues
+gnawky generate the report
+gnawky triage the findings, high and critical only
+gnawky what's wrong with next?
+gnawky ignore the lodash advisories, we only use it in build scripts
+gnawky fix next
+```
+
+- `gnawky` skill: picks up requests that mention Gnawky and runs the matching command below, then explains the results in grouped items, with Claude's verdicts where there are any. Before a triage it shows what will be sent and asks you; ignores need your reason. For fixes it explains the change and suggests an order, then sends you to the app's Review & fix, which applies them on a branch with your test scripts (Claude doesn't install packages itself unless you ask it to). Claude picks skills by their description, so a request without "gnawky" in it may not use it; the slash commands always do.
+- `/gnawky:scan`, `/gnawky:report`, `/gnawky:triage`: the same as slash commands
 - `security-reviewer` agent: read-only triage of true vs. false positives, drafts minimal fix diffs
 - `security-audit` skill (`gnawky:security-audit`): Cloudflare's multi-phase audit skill, bundled unmodified under its MIT license. See `skills/security-audit/VENDORED.md` for the source commit and how to update it. Gnawky loads it with `--plugin-dir`, so the menu item works without installing the plugin.
 
