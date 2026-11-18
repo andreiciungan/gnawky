@@ -25,6 +25,7 @@ import {
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
 import { usesNext } from './nextjs.js';
+import { saveFixRecord, advisoryIds } from './fixlog.js';
 import { rcFile, isInstalled as isHookInstalled, install, uninstall, refresh as refreshHook } from './shellhook.js';
 import { hookTarget, isHookInstalled as isCommitHookOn, installHook, uninstallHook, LEFTHOOK_SNIPPET } from './githook.js';
 import { recommendPin, pinSpec } from './overrides.js';
@@ -487,6 +488,7 @@ async function verifyScreen(s, report) {
     }
 
     // Keep (also when the user just backs out).
+    const saved = await saveFixLog(s, report, audit);
     if (auditAll) {
       const others = s.result.findings.filter((f) => !isDepAudit(f));
       s.result.findings = visibleFindings([...others, ...auditAll], s.cfg);
@@ -499,6 +501,7 @@ async function verifyScreen(s, report) {
     header(s);
     console.log(`${c.bold('Kept on branch')} ${report.branch}\n`);
     if (report.diffStat) console.log(`${report.diffStat}\n`);
+    if (saved) printFixLog(s, saved);
     console.log('Next steps:');
     console.log('  1. Review the changes:  git diff');
     console.log('  2. If a package needs a build step:  npm rebuild');
@@ -508,6 +511,39 @@ async function verifyScreen(s, report) {
     await pause();
     return;
   }
+}
+
+/**
+ * Saves which advisories the kept fix removed (with GHSA/CVE IDs) to .gnawky/fixes/.
+ * Uses the re-audit when there is one; otherwise the findings the applied changes target.
+ */
+async function saveFixLog(s, report, audit) {
+  const applied = report.steps.filter((st) => st.status === 'applied');
+  if (!applied.length) return null;
+  const targeted = new Set(applied.flatMap((st) => st.fingerprints ?? []));
+  const fixed = audit ? audit.fixed : s.result.findings.filter((f) => targeted.has(f.fingerprint));
+  const done = ticker('saving the fixed advisories');
+  try {
+    const saved = await saveFixRecord(s.dir, {
+      report, fixed, verified: Boolean(audit), pm: s.pm, offline: s.cfg.offline,
+      stillOpen: audit ? audit.remaining.length + audit.added.length : null,
+    });
+    done(`saved ${saved.record.fixed.length} fixed advisory(ies)`, 'ok');
+    return saved;
+  } catch (e) {
+    done(`could not save the fixed advisories: ${e.message}`, 'fail');
+    return null;
+  }
+}
+
+function printFixLog(s, { json, md, record }) {
+  const shown = record.fixed.slice(0, 10);
+  console.log(c.bold(`Fixed advisories${record.verified ? '' : c.yellow('  (not confirmed by a new audit)')}`));
+  for (const e of shown) console.log(`  ${sevTag(e.severity)} ${e.package}  ${c.gray(advisoryIds(e))}`);
+  if (record.fixed.length > shown.length) console.log(c.gray(`  … and ${record.fixed.length - shown.length} more`));
+  if (!record.fixed.length) console.log(c.gray('  none'));
+  if (record.note) console.log(c.yellow(`  ⚠ ${record.note}`));
+  console.log(c.gray(`  Saved to ${path.relative(s.dir, md)} (for a PR or ticket) and ${path.relative(s.dir, json)}\n`));
 }
 
 function buildClaudePrompt(s, f) {

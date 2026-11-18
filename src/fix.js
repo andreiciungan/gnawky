@@ -198,7 +198,7 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
     log(`→ ${step.label}`);
     const r = applyStep(dir, step);
     npmOutput += r.output;
-    const entry = { id: step.id, label: step.label, major: Boolean(step.major), findings: step.findings.length, status: 'applied' };
+    const entry = { id: step.id, kind: step.kind, package: step.package ?? null, version: step.version ?? null, label: step.label, major: Boolean(step.major), findings: step.findings.length, fingerprints: step.findings.map((f) => f.fingerprint), status: 'applied' };
     report.steps.push(entry);
     if (!r.ok) {
       entry.status = 'failed';
