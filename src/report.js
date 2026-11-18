@@ -30,7 +30,7 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
   out.push('## Findings', '');
   if (!findings.length) out.push('No findings at or above the selected severity.');
   const groups = groupFindings(findings);
-  if (groups.length < findings.length) out.push('_Advisories fixed by changing the same package are grouped: one upgrade fixes them all._', '');
+  if (groups.length < findings.length) out.push('_Advisories whose fix changes the same package are grouped; each item says how many its upgrade really fixes._', '');
   for (const g of groups) {
     if (isGroup(g)) pushGroup(out, g, triage);
     else pushFinding(out, g.lead, triage);
