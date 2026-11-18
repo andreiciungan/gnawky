@@ -5,6 +5,7 @@ import { SEVERITY_ORDER } from '../src/finding.js';
 import { loadConfig } from '../src/config.js';
 import { performScan, reportFile, htmlReportFile } from '../src/scan.js';
 import { ticker } from '../src/ui.js';
+import { UsageError } from '../src/cli.js';
 
 const HELP = `Gnawky - gnaws through your code, watches like a hawk.
 Security scanner for Node.js projects.
@@ -14,8 +15,17 @@ Interactive app (recommended):
 
 Headless mode (CI, scripts, the Claude plugin):
   gnawky [path] --no-ui          scan and write .gnawky/security-report.md and .html
-  gnawky [path] --json           print findings as JSON on stdout
+  gnawky [path] --json           print findings as JSON on stdout (one entry per advisory)
   gnawky [path] --ci             exit with code 1 if findings remain
+
+Commands (run inside the project; all but scan use the last scan in .gnawky/):
+  gnawky scan [path] [--json]    scan, then list the findings grouped like the app
+  gnawky findings [--json]       list the last scan's findings, grouped, with Claude's verdicts
+  gnawky report [--open]         rewrite the Markdown and HTML reports, optionally open the HTML one
+  gnawky triage [--severity critical,high] [--sources dependencies,code,secrets] [--all] [--parallel 1-3]
+                                 show what Claude triage would check; add --yes to run it
+  gnawky ignore <id|GHSA|CVE|package>... --reason "why"
+                                 ignore findings (a package ignores its whole grouped item)
   gnawky pre-commit              check dependencies in the staged lockfile (used by the git hook);
                                  fails only on new high/critical findings (--min-severity to change)
 
@@ -67,7 +77,17 @@ async function main() {
     process.exitCode = await preCommit({ minSeverity });
     return;
   }
-  const o = parseArgs(process.argv.slice(2));
+  const sub = process.argv[2];
+  const COMMANDS = { findings: 'findingsCommand', report: 'reportCommand', triage: 'triageCommand', ignore: 'ignoreCommand' };
+  if (COMMANDS[sub]) {
+    if (process.argv.slice(3).some((a) => a === '-h' || a === '--help')) { console.log(HELP); return; }
+    const cli = await import('../src/cli.js');
+    await cli[COMMANDS[sub]](process.cwd(), process.argv.slice(3));
+    return;
+  }
+  const scanCmd = sub === 'scan';
+  const o = parseArgs(process.argv.slice(scanCmd ? 3 : 2));
+  if (scanCmd) o.noUi = true;
   const dir = path.resolve(o.target);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
     console.error(`Not a directory: ${dir}`);
@@ -92,7 +112,10 @@ async function main() {
   const result = await performScan(dir, cfg, log, { onStep: (label) => ticker(label, process.stderr) });
   for (const t of result.tools) if (t.status !== 'ran') log(`  ${t.name}: ${t.status} (${t.message})`);
 
-  if (o.json) {
+  if (scanCmd) {
+    const { showFindings } = await import('../src/cli.js');
+    showFindings(dir, result, { json: o.json });
+  } else if (o.json) {
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } else {
     const counts = SEVERITY_ORDER.map((s) => [s, result.findings.filter((f) => f.severity === s).length]).filter(([, n]) => n);
@@ -109,6 +132,10 @@ async function main() {
 }
 
 main().catch((e) => {
+  if (e instanceof UsageError) {
+    console.error(e.message);
+    process.exit(2);
+  }
   console.error(`gnawky failed: ${e.message}`);
   process.exit(2);
 });
