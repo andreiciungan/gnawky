@@ -1,4 +1,4 @@
-// Headless subcommands (`gnawky findings | report | triage | ignore`), used by the Claude
+// Headless subcommands (`gnawky findings | report | triage | ignore | fix`), used by the Claude
 // Code plugin's gnawky skill and usable from scripts. Each works on the last scan in
 // .gnawky/; `gnawky scan` (or `gnawky --no-ui`) makes a new one.
 
@@ -17,7 +17,16 @@ import { isAvailable, IS_WIN } from './scanners.js';
 import {
   groupFindings, isGroup, groupFixes, groupTitle, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage,
 } from './groups.js';
-import { lockfileName, packageManager } from './pm.js';
+import { lockfileName, packageManager, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS } from './pm.js';
+import { OUT_DIR } from './config.js';
+import { visibleFindings } from './scan.js';
+import {
+  isAutoFixable, emptyPlan, addFixToPlan, planSteps, isForced, preflight, applyPlan, regressions, undoFix, fixBranchName,
+} from './fix.js';
+import { recommendPin } from './overrides.js';
+import { detectScripts, diffFindings, VERIFY_SCRIPTS } from './verify.js';
+import { scanDependencies } from './scanners.js';
+import { saveFixRecord } from './fixlog.js';
 
 export class UsageError extends Error {}
 
@@ -302,4 +311,229 @@ export function ignoreCommand(dir, argv) {
   out(`Ignored ${findings.length} finding(s) in .gnawky-ignore.json (reason: ${reason}):`);
   for (const f of findings) out(`  - [${f.severity}] ${f.title}`);
   out('Restore them from the app: Findings › Ignored findings. New advisories for the same packages will still show up.');
+}
+
+// ------------------------------------------------------------------ fix
+
+const PENDING = 'pending-fix.json';
+const pendingFile = (dir) => path.join(dir, OUT_DIR, PENDING);
+const readPending = (dir) => { try { return JSON.parse(fs.readFileSync(pendingFile(dir), 'utf8')); } catch { return null; } };
+
+/** The findings a fix target means: a package (its whole grouped item), a finding id, or a GHSA/CVE ID. */
+function resolveTargets(findings, targets) {
+  const groups = groupFindings(findings);
+  const picked = new Map();
+  const unknown = [];
+  for (const target of targets) {
+    const t = target.toLowerCase();
+    const hits = [
+      ...findings.filter((f) => f.fingerprint === t || idsOf(f).some((x) => x.toLowerCase() === t)),
+      ...(groups.find((g) => g.package && g.package.toLowerCase() === t)?.findings ?? []),
+    ];
+    if (!hits.length) unknown.push(target);
+    for (const f of hits) picked.set(f.fingerprint, f);
+  }
+  return { findings: [...picked.values()], unknown };
+}
+
+function stepView(dir, st) {
+  const v = { kind: st.kind, label: st.label, package: st.package ?? null, version: st.version ?? null, major: Boolean(st.major), findings: st.findings.length };
+  if (isForced(st.kind)) {
+    const { pin, reason } = recommendPin(dir, st.package);
+    Object.assign(v, { pin: st.pin, recommendedPin: pin, pinReason: reason });
+  }
+  return v;
+}
+
+/**
+ * `gnawky fix <package|id|GHSA|CVE>... | --all [--scripts test,build|all] [--one-at-a-time]
+ *  [--pin caret|exact] [--yes] [--json]`, then `gnawky fix --keep` or `gnawky fix --undo`.
+ * Without --yes it only shows the plan. With --yes it applies it on a new branch (install
+ * scripts off), runs the chosen package.json scripts before and after, audits again, and
+ * leaves the branch for --keep or --undo, like the app's verify screen.
+ */
+export async function fixCommand(dir, argv) {
+  const o = parse(argv, ['all', 'yes', 'json', 'keep', 'undo', 'one-at-a-time']);
+  if (o.keep || o.undo) return finishFix(dir, o);
+  const pending = readPending(dir);
+  if (pending) {
+    throw new UsageError(`A fix is waiting for a decision on branch ${pending.report.branch}: run \`gnawky fix --keep\` or \`gnawky fix --undo\` first.`);
+  }
+  if (!o.all && !o._.length) throw new UsageError('Usage: gnawky fix <package | finding id | GHSA/CVE ID>... (or --all) [--scripts test,build] [--yes]');
+
+  const cfg = loadConfig(dir);
+  const result = lastScan(dir, cfg);
+  if (isStale(dir, result)) throw new UsageError('package.json or the lockfile changed since the last scan. Run `gnawky scan` first so the fixes match.');
+  const { findings: wanted, unknown } = o.all ? { findings: result.findings, unknown: [] } : resolveTargets(result.findings, o._);
+  if (unknown.length) throw new UsageError(`Not in the last scan: ${unknown.join(', ')}. Nothing was changed. (\`gnawky findings\` lists ids and packages.)`);
+
+  const auto = wanted.filter(isAutoFixable);
+  const manual = wanted.filter((f) => !isAutoFixable(f));
+  const plan = emptyPlan();
+  for (const f of auto) addFixToPlan(plan, f);
+  const pinArg = o.pin;
+  if (pinArg !== undefined && !['caret', 'exact'].includes(pinArg)) throw new UsageError('--pin must be caret or exact');
+  for (const st of planSteps(plan).filter((x) => isForced(x.kind))) plan.pins[st.package] = pinArg ?? recommendPin(dir, st.package).pin;
+  const steps = planSteps(plan);
+
+  const available = detectScripts(dir);
+  let scripts = [];
+  if (o.scripts !== undefined) {
+    scripts = o.scripts === 'all' ? available : list(o.scripts, VERIFY_SCRIPTS, 'scripts');
+    const missing = scripts.filter((n) => !available.includes(n));
+    if (missing.length) throw new UsageError(`package.json has no usable script: ${missing.join(', ')} (it has: ${available.join(', ') || 'none'})`);
+  }
+  const oneAtATime = Boolean(o['one-at-a-time']) && scripts.length > 0 && steps.length > 1;
+  const problem = steps.length ? preflight(dir) : null;
+  const manualItems = groupFindings(manual).map((g) => ({ title: groupTitle(g), fixes: groupFixes(g).map((x) => x.fix?.detail) }));
+  const view = {
+    steps: steps.map((st) => stepView(dir, st)),
+    branch: steps.length ? fixBranchName(dir, steps) : null,
+    findings: auto.length,
+    notAutomatic: manualItems,
+    blocked: problem,
+    scripts,
+    availableScripts: available,
+    oneAtATime,
+    pm: packageManager(dir),
+  };
+
+  if (!steps.length) {
+    if (o.json) out(JSON.stringify({ applied: false, plan: view, reason: 'nothing can be fixed automatically' }, null, 2));
+    else {
+      out('Nothing here can be fixed automatically.');
+      for (const m of manualItems) out(`  ${m.title}: ${m.fixes.join(' / ')}`);
+    }
+    return;
+  }
+  if (!o.yes || problem) {
+    if (o.json) { out(JSON.stringify({ applied: false, plan: view }, null, 2)); return; }
+    out(`Plan: ${auto.length} finding(s), ${steps.length} change(s), in this order:`);
+    for (const [i, st] of view.steps.entries()) {
+      out(`  ${i + 1}. ${st.label}${st.major ? '  (MAJOR version: may break your code)' : ''}  [${st.findings} finding(s)]`);
+      if (st.recommendedPin) out(`     pinned ${st.pin === 'exact' ? 'exactly' : 'as a ^range'}${st.pin === st.recommendedPin ? ` (recommended: ${st.pinReason})` : ` (Gnawky recommends ${st.recommendedPin}: ${st.pinReason})`}`);
+    }
+    if (manualItems.length) {
+      out('Not fixable automatically (left as they are):');
+      for (const m of manualItems) out(`  ${m.title}: ${m.fixes.join(' / ')}`);
+    }
+    out(`\nThe changes go on a new branch, ${view.branch}, with install scripts disabled; you decide afterwards to keep or undo them.`);
+    if (scripts.length) {
+      out(`Verification: runs ${scripts.map((n) => runLabel(view.pm, n)).join(', ')} before and after${oneAtATime ? ' each change, undoing any change that breaks them' : ''}.`);
+      out('  This runs the project\'s own code (tests may start servers or use the network). 15 minutes per script.');
+    } else {
+      out(`Verification: only dependency compatibility. ${available.length ? `Add --scripts ${available.join(',')} (or a subset) to run the project's scripts before and after; that runs the project's own code.` : 'package.json has no test, build, lint or typecheck script.'}`);
+    }
+    if (problem) out(`\nBlocked: ${problem}`);
+    else out('\nNothing was changed. Run again with --yes to apply.');
+    return;
+  }
+
+  const log = (m) => err(m);
+  const report = applyPlan(dir, plan, log, { scripts, oneAtATime });
+  if (!report.branch) throw new UsageError(`Nothing was changed: ${report.skipped ?? 'the fix could not start.'}`);
+
+  let audit = null;
+  let auditAll = null;
+  if (!cfg.offline && cfg.scanners['npm-audit'] !== false) {
+    err(`\nRunning ${auditName(view.pm)} again…`);
+    const res = await scanDependencies(dir);
+    if (res.findings) {
+      auditAll = filterFindings(dir, cfg, res.findings);
+      audit = diffFindings(result.findings.filter(isDepAudit), auditAll);
+    }
+  }
+  fs.writeFileSync(pendingFile(dir), JSON.stringify({ report, audit, auditAll }, null, 2) + '\n');
+  printFixReport(dir, report, audit, view.pm, o.json);
+}
+
+const brief = (f) => ({ severity: f.severity, title: f.title, ids: idsOf(f) });
+
+function printFixReport(dir, report, audit, pm, json) {
+  const broken = regressions(report);
+  const data = {
+    applied: true,
+    branch: report.branch,
+    base: report.base,
+    steps: report.steps.map((st) => ({ label: st.label, major: st.major, findings: st.findings, status: st.status, note: st.note, broke: st.broke, error: st.error })),
+    scripts: report.scripts.map((n) => ({
+      script: runLabel(pm, n),
+      before: report.baseline[n] ? (report.baseline[n].ok ? 'passed' : 'failed') : null,
+      after: report.after[n] ? (report.after[n].ok ? 'passed' : report.after[n].timedOut ? 'timed out' : 'failed') : null,
+      log: report.after[n]?.logFile ?? null,
+    })),
+    scriptsSkipped: report.scriptsSkipped,
+    brokeScripts: broken.map((n) => runLabel(pm, n)),
+    newDependencyProblems: report.lsNew,
+    engineWarnings: report.engines,
+    audit: audit ? { fixed: audit.fixed.length, stillOpen: audit.remaining.length, new: audit.added.map(brief) } : null,
+    diffStat: report.diffStat,
+    next: 'gnawky fix --keep (keep the branch, save the fixed advisories) or gnawky fix --undo (back to the base branch, delete this one)',
+  };
+  if (json) { out(JSON.stringify(data, null, 2)); return; }
+  out(`Fix applied on branch ${report.branch} (from ${report.base}).`);
+  for (const st of data.steps) out(`  ${{ applied: '✔', skipped: '–', reverted: '↩', failed: '✖' }[st.status] ?? '?'} ${st.label}${st.major ? ' (major)' : ''}  ${st.status}${st.note ? `: ${st.note}` : ''}${st.broke ? `: broke ${st.broke.join(', ')}` : ''}`);
+  out(report.lsNew.length ? `New dependency problems: ${report.lsNew.slice(0, 8).join('; ')}` : 'No new dependency problems.');
+  if (report.engines.length) out(`Packages that say they don't support Node ${process.version}: ${report.engines.slice(0, 8).join('; ')}`);
+  if (audit) out(`Audit again: fixed ${audit.fixed.length}, still open ${audit.remaining.length}, new ${audit.added.length}.`);
+  if (report.scriptsSkipped) out(`Scripts not run: ${report.scriptsSkipped}`);
+  else if (!report.scripts.length) out('Scripts: not run, so the fix is not verified. Run the app and tests before committing.');
+  for (const s of data.scripts) out(`  ${s.script}: ${s.before ?? '-'} before, ${s.after ?? (report.oneAtATime ? 'checked after each change' : '-')} after`);
+  if (broken.length) out(`The fix broke: ${data.brokeScripts.join(', ')} (logs in .gnawky/verify-after-*.log).`);
+  out(`\nNext: ${data.next}.`);
+}
+
+async function finishFix(dir, o) {
+  const pending = readPending(dir);
+  if (!pending) throw new UsageError('No fix is waiting for a decision.');
+  const { report, audit, auditAll } = pending;
+  if (o.undo) {
+    const ok = undoFix(dir, report, (m) => err(m));
+    if (!ok) throw new UsageError(`Could not switch back to ${report.base}. You are still on ${report.branch}; nothing was deleted.`);
+    fs.rmSync(pendingFile(dir), { force: true });
+    out(`Undone: back on ${report.base}, branch ${report.branch} deleted.`);
+    return;
+  }
+  // Keep: save the fixed advisories, and update the results with the new audit.
+  const cfg = loadConfig(dir);
+  const result = lastScan(dir, cfg);
+  const pm = packageManager(dir);
+  const applied = report.steps.filter((st) => st.status === 'applied');
+  let saved = null;
+  if (applied.length) {
+    const targeted = new Set(applied.flatMap((st) => st.fingerprints ?? []));
+    const fixed = audit ? audit.fixed : result.findings.filter((f) => targeted.has(f.fingerprint));
+    try {
+      saved = await saveFixRecord(dir, {
+        report, fixed, verified: Boolean(audit), pm, offline: cfg.offline,
+        stillOpen: audit ? audit.remaining.length + audit.added.length : null,
+      });
+    } catch (e) {
+      err(`Could not save the fixed advisories: ${e.message}`);
+    }
+  }
+  if (auditAll) {
+    const others = result.findings.filter((f) => !isDepAudit(f));
+    result.findings = visibleFindings([...others, ...auditAll], cfg);
+    const tool = result.tools.find((t) => DEP_AUDIT_TOOLS.includes(t.name));
+    if (tool) tool.count = auditAll.length;
+    result.date = new Date().toISOString();
+    writeReports(dir, result);
+  }
+  fs.rmSync(pendingFile(dir), { force: true });
+  const files = `package.json ${lockfileName(pm)}`;
+  if (o.json) {
+    out(JSON.stringify({
+      kept: true, branch: report.branch, base: report.base, diffStat: report.diffStat,
+      fixedLog: saved ? { markdown: saved.md, json: saved.json, fixed: saved.record.fixed.length, verified: saved.record.verified, note: saved.record.note ?? null } : null,
+      rescanNeeded: !auditAll,
+      commit: `git add ${files} && git commit -m "Fix vulnerable dependencies"`,
+    }, null, 2));
+    return;
+  }
+  out(`Kept on branch ${report.branch}.`);
+  if (report.diffStat) out(report.diffStat);
+  if (saved) out(`Fixed advisories (${saved.record.fixed.length}${saved.record.verified ? '' : ', not confirmed by a new audit'}) saved to ${path.relative(dir, saved.md)} for a PR or ticket.`);
+  if (!auditAll) out('Run `gnawky scan` to refresh the results.');
+  out(`Next: review with git diff, then commit on this branch: git add ${files} && git commit -m "Fix vulnerable dependencies"`);
 }

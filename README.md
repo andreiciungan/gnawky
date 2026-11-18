@@ -109,7 +109,12 @@ gnawky report [--open]                     # rewrite both reports, optionally op
 gnawky triage [--severity critical,high] [--sources dependencies,code,secrets] [--all] [--parallel 3]
                                            # shows what Claude triage would send; add --yes to run it
 gnawky ignore <id|GHSA|CVE|package>... --reason "why"   # a package ignores its whole grouped item
+gnawky fix <package|id|GHSA|CVE>... | --all [--scripts test,build|all] [--one-at-a-time] [--pin caret|exact]
+                                           # shows the fix plan; add --yes to apply it on a new branch
+gnawky fix --keep | --undo                 # keep the fix branch (and log the fixed advisories) or throw it away
 ```
+
+`gnawky fix` is the app's Review & fix without the menus: the same order, branch, disabled install scripts, script verification (only with `--scripts`, since it runs your project's code), audit afterwards and fixed-advisories log. After `--yes` the branch waits for `--keep` or `--undo`, like the app's results screen.
 
 Headless mode for CI and scripts:
 
@@ -215,8 +220,8 @@ gnawky ignore the lodash advisories, we only use it in build scripts
 gnawky fix next
 ```
 
-- `gnawky` skill: picks up requests that mention Gnawky and runs the matching command below, then explains the results in grouped items, with Claude's verdicts where there are any. Before a triage it shows what will be sent and asks you; ignores need your reason. For fixes it explains the change and suggests an order, then sends you to the app's Review & fix, which applies them on a branch with your test scripts (Claude doesn't install packages itself unless you ask it to). Claude picks skills by their description, so a request without "gnawky" in it may not use it; the slash commands always do.
-- `/gnawky:scan`, `/gnawky:report`, `/gnawky:triage`: the same as slash commands
+- `gnawky` skill: picks up requests that mention Gnawky and runs the matching command below, then explains the results in grouped items, with Claude's verdicts where there are any. Before a triage it shows what will be sent and asks you; ignores need your reason. For fixes it shows Gnawky's plan, suggests an order (or splitting a risky major upgrade into its own branch), asks whether to verify with your scripts, and applies it with `gnawky fix` only after you agree; you then choose keep or undo. Claude doesn't install packages or edit the lockfile itself. Claude picks skills by their description, so a request without "gnawky" in it may not use it; the slash commands always do.
+- `/gnawky:scan`, `/gnawky:report`, `/gnawky:triage`, `/gnawky:fix`: the same as slash commands
 - `security-reviewer` agent: read-only triage of true vs. false positives, drafts minimal fix diffs
 - `security-audit` skill (`gnawky:security-audit`): Cloudflare's multi-phase audit skill, bundled unmodified under its MIT license. See `skills/security-audit/VENDORED.md` for the source commit and how to update it. Gnawky loads it with `--plugin-dir`, so the menu item works without installing the plugin.
 
