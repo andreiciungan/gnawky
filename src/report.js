@@ -1,6 +1,6 @@
 import { SEVERITY_ORDER } from './finding.js';
 import { scopeText, groupScopeText, isProdFirst, prodFirstCount, shipsToProd } from './prod.js';
-import { VERDICTS, URGENCIES } from './triage.js';
+import { VERDICTS, URGENCIES, reviewGroups } from './triage.js';
 import { groupFindings, isGroup, groupFixes, groupTitle, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -20,7 +20,10 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
   const first = prodFirstCount(findings);
   const dev = findings.filter((f) => !shipsToProd(f)).length;
   if (first || dev) {
-    out.push(`**Fix for production first:** ${first} critical/high finding(s) that ship to production, listed first.${dev ? ` ${dev} come only from devDependencies and are listed last.` : ''}`, '');
+    const triaged = findings.some((f) => triage.entries?.[f.fingerprint]);
+    out.push(triaged
+      ? `**Fix for production first:** ${first} critical/high finding(s) ship to production. The findings below follow Claude's order (fix now first, likely false positives last).`
+      : `**Fix for production first:** ${first} critical/high finding(s) that ship to production, listed first.${dev ? ` ${dev} come only from devDependencies and are listed last.` : ''}`, '');
   }
 
   out.push('## Scanners', '');
@@ -35,7 +38,7 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
 
   out.push('## Findings', '');
   if (!findings.length) out.push('No findings at or above the selected severity.');
-  const groups = groupFindings(findings);
+  const groups = reviewGroups(findings, triage);
   if (groups.length < findings.length) out.push('_Advisories whose fix changes the same package are grouped; each item says how many its upgrade really fixes._', '');
   for (const g of groups) {
     if (isGroup(g)) pushGroup(out, g, triage);

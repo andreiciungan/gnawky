@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { OUT_DIR, ensureOutDir } from './config.js';
 import { isDependencyFinding } from './pm.js';
 import { rank } from './finding.js';
+import { groupFindings } from './groups.js';
 import { scanGitleaks, isAvailable } from './scanners.js';
 
 // Claude triage: a read-only, headless Claude Code run that gives each finding a
@@ -37,16 +38,36 @@ function saveTriage(dir, triage) {
   fs.writeFileSync(file(dir), JSON.stringify(triage, null, 2) + '\n');
 }
 
-/** Claude's urgency as a sort key: fix now first, untriaged last, then by severity. */
+/** Claude's urgency as a sort key: fix now first, then untriaged, likely false positives last, then by severity. */
 export function triageOrder(findings, triage) {
   const key = (f) => {
     // Full-audit findings were already verified independently: ranked by their own severity.
     if (f.tool === 'claude-audit') return rank(f.severity) <= 1 ? 0 : rank(f.severity) === 2 ? 1 : 2;
     const t = triage.entries[f.fingerprint];
-    if (!t) return URGENCY_ORDER.length + 1;
-    return t.verdict === 'false-positive' ? URGENCY_ORDER.length : URGENCY_ORDER.indexOf(t.urgency);
+    if (!t) return URGENCY_ORDER.length;
+    return t.verdict === 'false-positive' ? URGENCY_ORDER.length + 1 : URGENCY_ORDER.indexOf(t.urgency);
   };
   return [...findings].sort((a, b) => key(a) - key(b) || rank(a.severity) - rank(b.severity));
+}
+
+export const isLikelyFalsePositive = (f, triage) => triage?.entries?.[f.fingerprint]?.verdict === 'false-positive';
+
+/**
+ * Groups in the order to work through them: Claude's order once anything is triaged (fix now,
+ * fix soon, low, untriaged, likely false positives last); otherwise as given (production first).
+ */
+export function reviewGroups(findings, triage) {
+  const triaged = findings.some((f) => triage?.entries?.[f.fingerprint]);
+  return falsePositivesLast(groupFindings(triaged ? triageOrder(findings, triage) : [...findings]), triage);
+}
+
+/**
+ * Moves the groups Claude marked as likely false positives (every finding in them) to the end,
+ * keeping the order otherwise. A group with one real finding stays where it is.
+ */
+export function falsePositivesLast(groups, triage) {
+  const fp = (g) => g.findings.every((f) => isLikelyFalsePositive(f, triage));
+  return [...groups.filter((g) => !fp(g)), ...groups.filter(fp)];
 }
 
 /**

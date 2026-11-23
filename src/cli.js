@@ -21,12 +21,13 @@ import { lockfileName, packageManager, runLabel, auditName, isDepAudit, DEP_AUDI
 import { OUT_DIR } from './config.js';
 import { visibleFindings } from './scan.js';
 import {
-  isAutoFixable, emptyPlan, addFixToPlan, planSteps, isForced, preflight, applyPlan, regressions, undoFix, fixBranchName,
+  isAutoFixable, emptyPlan, addFixToPlan, planSteps, isForced, preflight, planMismatch, applyPlan, regressions, undoFix, fixBranchName,
 } from './fix.js';
 import { recommendPin } from './overrides.js';
 import { detectScripts, diffFindings, VERIFY_SCRIPTS } from './verify.js';
 import { scanDependencies } from './scanners.js';
 import { saveFixRecord } from './fixlog.js';
+import { saveFixBranch, clearFixBranch } from './smoke.js';
 import { shipsToProd, priorityTier, prodFirstCount, scopeText, groupScopeText } from './prod.js';
 
 export class UsageError extends Error {}
@@ -398,7 +399,7 @@ export async function fixCommand(dir, argv) {
     if (missing.length) throw new UsageError(`package.json has no usable script: ${missing.join(', ')} (it has: ${available.join(', ') || 'none'})`);
   }
   const oneAtATime = Boolean(o['one-at-a-time']) && scripts.length > 0 && steps.length > 1;
-  const problem = steps.length ? preflight(dir) : null;
+  const problem = steps.length ? (planMismatch(dir, plan) ?? preflight(dir)) : null;
   const manualItems = groupFindings(manual).map((g) => ({ title: groupTitle(g), fixes: groupFixes(g).map((x) => x.fix?.detail) }));
   const view = {
     steps: steps.map((st) => stepView(dir, st)),
@@ -444,7 +445,7 @@ export async function fixCommand(dir, argv) {
   }
 
   const log = (m) => err(m);
-  const report = applyPlan(dir, plan, log, { scripts, oneAtATime });
+  const report = await applyPlan(dir, plan, log, { scripts, oneAtATime });
   if (!report.branch) throw new UsageError(`Nothing was changed: ${report.skipped ?? 'the fix could not start.'}`);
 
   let audit = null;
@@ -458,6 +459,7 @@ export async function fixCommand(dir, argv) {
     }
   }
   fs.writeFileSync(pendingFile(dir), JSON.stringify({ report, audit, auditAll }, null, 2) + '\n');
+  saveFixBranch(dir, report);
   printFixReport(dir, report, audit, view.pm, o.json);
 }
 
@@ -505,6 +507,7 @@ async function finishFix(dir, o) {
     const ok = undoFix(dir, report, (m) => err(m));
     if (!ok) throw new UsageError(`Could not switch back to ${report.base}. You are still on ${report.branch}; nothing was deleted.`);
     fs.rmSync(pendingFile(dir), { force: true });
+    clearFixBranch(dir);
     out(`Undone: back on ${report.base}, branch ${report.branch} deleted.`);
     return;
   }

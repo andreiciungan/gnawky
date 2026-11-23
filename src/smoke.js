@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { ensureOutDir, OUT_DIR } from './config.js';
 import { IS_WIN } from './scanners.js';
 
@@ -172,3 +172,77 @@ Rules. Follow them strictly:
 }
 
 export const SMOKE_DIR = `${OUT_DIR}/smoke`;
+
+// ---- the last fix branch, so the smoke test can also run later (after Keep, or another day)
+
+const fixBranchFile = (dir) => path.join(dir, OUT_DIR, 'fix-branch.json');
+
+/** Remembers the fix branch: { branch, base, changes: [label…], date, smoke }. */
+export function saveFixBranch(dir, report, smoke = null) {
+  const changes = (report.steps ?? []).filter((st) => st.status === 'applied').map((st) => st.label);
+  const data = { branch: report.branch, base: report.base, changes, date: new Date().toISOString(), smoke };
+  fs.writeFileSync(path.join(ensureOutDir(dir), 'fix-branch.json'), JSON.stringify(data, null, 2) + '\n');
+}
+
+export function loadFixBranch(dir) {
+  return readJson(fixBranchFile(dir));
+}
+
+export function clearFixBranch(dir) {
+  fs.rmSync(fixBranchFile(dir), { force: true });
+}
+
+/** A report-like object for the smoke test from the saved fix branch. */
+export const reportFromFixBranch = (fb) => ({
+  branch: fb.branch, base: fb.base, steps: fb.changes.map((label) => ({ status: 'applied', label })), smoke: fb.smoke ?? null, guessed: !!fb.guessed,
+});
+
+// ---- a fix branch Gnawky didn't save (made before it remembered them, or by hand)
+
+const git = (dir, args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+
+/** The branch checked out now, or '' (detached HEAD, not a git repo). */
+export function currentBranch(dir) {
+  const b = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout?.trim() ?? '';
+  return b === 'HEAD' ? '' : b;
+}
+
+/** The branch a fix branch most likely started from: main, master or develop, whichever exists. */
+function guessBase(dir) {
+  return ['main', 'master', 'develop'].find((b) => git(dir, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).status === 0) ?? null;
+}
+
+/** "upgrade lodash ^4.17.20 → ^4.18.1" for each dependency that differs from the base's package.json. */
+export function packageChanges(dir, base) {
+  const old = git(dir, ['show', `${base}:package.json`]);
+  if (old.status !== 0) return [];
+  let before;
+  try { before = JSON.parse(old.stdout); } catch { return []; }
+  const now = readJson(path.join(dir, 'package.json')) ?? {};
+  const KEYS = ['dependencies', 'devDependencies', 'optionalDependencies', 'overrides', 'resolutions'];
+  const flat = (pkg) => Object.assign({}, ...KEYS.map((k) => Object.fromEntries(
+    Object.entries(pkg[k] ?? {}).filter(([, v]) => typeof v === 'string'))));
+  const a = flat(before);
+  const b = flat(now);
+  const out = [];
+  for (const name of Object.keys(b).sort()) {
+    if (!(name in a)) out.push(`add ${name} ${b[name]}`);
+    else if (a[name] !== b[name]) out.push(`upgrade ${name} ${a[name]} → ${b[name]}`);
+  }
+  for (const name of Object.keys(a).sort()) if (!(name in b)) out.push(`remove ${name}`);
+  return out;
+}
+
+/**
+ * The fix branch to smoke-test: the saved one when it's checked out, else a fix/upgrade-… branch
+ * checked out now, with its changes read from package.json against the branch it started from.
+ */
+export function fixBranchFor(dir) {
+  const branch = currentBranch(dir);
+  if (!branch) return null;
+  const saved = loadFixBranch(dir);
+  if (saved?.branch === branch) return saved;
+  if (!branch.startsWith('fix/upgrade-')) return null;
+  const base = guessBase(dir);
+  return { branch, base: base ?? 'the base branch', changes: base ? packageChanges(dir, base) : [], date: null, smoke: null, guessed: true };
+}

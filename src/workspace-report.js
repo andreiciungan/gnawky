@@ -1,10 +1,34 @@
 import fs from 'node:fs';
 import { SEVERITY_ORDER, rank } from './finding.js';
-import { groupFindings, isGroup, groupFixes, groupTitle, severityCounts, idsOf } from './groups.js';
+import { isGroup, groupFixes, groupTitle, severityCounts, idsOf } from './groups.js';
 import {
   mergeAdvisories, throughProjects, sharedVersions, countBySeverity, sharedPackages, writeWorkspaceResult, workspaceReportFile, workspaceHtmlFile,
+  attachTriage, triageCounts,
 } from './workspace.js';
-import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND } from './html-report.js';
+import { reviewGroups, VERDICTS, URGENCIES } from './triage.js';
+
+const URG_RANK = { now: 0, soon: 1, low: 2 };
+const VERDICT_RANK = { real: 0, 'needs-review': 1, 'false-positive': 2 };
+/** A project's verdicts in the shape triage.js uses. */
+const triageOf = (p) => ({ entries: p.triage ?? {} });
+/**
+ * Claude's verdict for a group of findings in one project: the most serious one (a real issue
+ * before "needs a human" before a likely false positive, then the most urgent), or null.
+ */
+function groupVerdict(g, p) {
+  const ts = g.findings.map((f) => p.triage?.[f.fingerprint]).filter(Boolean);
+  if (!ts.length) return null;
+  return [...ts].sort((a, b) => (VERDICT_RANK[a.verdict] ?? 1) - (VERDICT_RANK[b.verdict] ?? 1) || (URG_RANK[a.urgency] ?? 2) - (URG_RANK[b.urgency] ?? 2))[0];
+}
+/** Groups in report order: Claude's order once triaged (likely false positives last). */
+const projectGroups = (p) => reviewGroups(p.findings, triageOf(p));
+const triageLine = (projects) => {
+  const n = triageCounts(projects);
+  return n.real + n.falsePositive + n.unsure
+    ? `Claude triage: ${n.real} real, ${n.falsePositive} likely false positive${n.falsePositive === 1 ? '' : 's'}, ${n.unsure} unsure, ${n.none} not triaged.`
+    : null;
+};
+import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges } from './html-report.js';
 import { prodFirstCount, shipsToProd, priorityTier } from './prod.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -45,6 +69,8 @@ export function renderWorkspaceMarkdown(result) {
 
   const first = prodFirstCount(result.projects.flatMap((p) => p.findings));
   out.push(`**Fix for production first:** ${first} critical/high finding(s) ship to production across the projects (column "Prod first"). Findings that only devDependencies bring in are listed last.`, '');
+  const tl = triageLine(result.projects);
+  if (tl) out.push(`**${tl}** Likely false positives are listed last in each project. Verdicts are suggestions.`, '');
   out.push('## Projects', '', '| Project | Package manager | Dependency audit | Prod first | Findings | Uses |', '|---|---|---|---|---|---|');
   for (const p of result.projects) {
     const a = d.audit(p);
@@ -111,12 +137,14 @@ export function renderWorkspaceMarkdown(result) {
     out.push(`### ${p.rel} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
     for (const n of p.notes ?? []) out.push(`- _Note: ${cell(n)}_`);
     for (const t of p.tools) if (t.status !== 'ran') out.push(`- _${t.name} ${t.status}: ${cell(t.message)}_`);
-    for (const g of groupFindings(p.findings)) {
+    for (const g of projectGroups(p)) {
       const fixes = groupFixes(g);
       const fix = fixes.length === 1 ? fixes[0].fix.detail : `${fixes.length} different fixes`;
       const via = (g.lead.via ?? []).filter((v) => v !== g.package);
       const tag = ['fix first, production', 'production', 'dev only'][Math.min(...g.findings.map(priorityTier))];
-      out.push(`- **[${g.severity.toUpperCase()}] ${cell(groupTitle(g))}**${isGroup(g) ? ` (${severityCounts(g.findings)})` : ''} _${tag}_${via.length ? `, via ${via.join(', ')}` : ''}. ${cell(fix)}`);
+      const t = groupVerdict(g, p);
+      const claude = t ? ` Claude: ${VERDICTS[t.verdict] ?? t.verdict}${t.verdict === 'false-positive' ? '' : `, ${URGENCIES[t.urgency] ?? t.urgency}`}${t.reason ? ` (${cell(t.reason)})` : ''}.` : '';
+      out.push(`- **[${g.severity.toUpperCase()}] ${cell(groupTitle(g))}**${isGroup(g) ? ` (${severityCounts(g.findings)})` : ''} _${tag}_${via.length ? `, via ${via.join(', ')}` : ''}. ${cell(fix)}${claude}`);
     }
     if (!p.findings.length && p.tools.some((t) => t.status === 'ran')) out.push('No findings at or above the selected severity.');
     out.push('');
@@ -213,7 +241,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const title = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>` : esc(a.title);
       return `<li>${sevBadge(a.severity)} ${title} <span class="muted">${esc([a.ghsa, `${a.projects.length} project${a.projects.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></li>`;
     }).join('');
-    return `<details class="finding sev-${esc(e.severity)}"${i < 3 ? ' open' : ''}><summary><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span><span class="title">${esc(e.package)}: ${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'}</span>${badge}<span class="meta">${esc(countBySeverity(e.advisories))} · ${e.projects.length} projects</span></summary>
+    return `<details class="finding sev-${esc(e.severity)}" data-tier="${e.prodFirst ? 0 : e.prod ? 1 : 2}"${i < 3 ? ' open' : ''}><summary><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span><span class="title">${esc(e.package)}: ${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'}</span>${badge}<span class="meta">${esc(countBySeverity(e.advisories))} · ${e.projects.length} projects</span></summary>
 <div class="advs"><div class="scroll"><table><thead><tr><th>Project</th><th>Production</th><th>Advisories</th><th>Fix there</th></tr></thead><tbody>${rows}</tbody></table></div>
 <div class="advs-h" style="margin-top:12px">Advisories</div><ul class="advlist">${advs}</ul></div></details>`;
   }).join('\n');
@@ -223,16 +251,18 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
   const perProject = result.projects.map((p) => {
     const notes = (p.notes ?? []).map((n) => `<li class="note-line">Note: ${esc(n)}</li>`).join('');
     const skipped = notes + p.tools.filter((t) => t.status !== 'ran').map((t) => `<li class="muted">${esc(t.name)} ${esc(t.status)}: ${esc(t.message)}</li>`).join('');
-    const items = groupFindings(p.findings).map((g) => {
+    const items = projectGroups(p).map((g) => {
       const fixes = groupFixes(g);
       const via = (g.lead.via ?? []).filter((v) => v !== g.package);
       const ids = isGroup(g) ? '' : idsOf(g.lead).join(', ');
       const tier = Math.min(...g.findings.map(priorityTier));
       const badge = tier === 0 ? ' <span class="tri prod-first">prod first</span>' : tier === 2 ? ' <span class="tri">dev only</span>' : '';
-      return `<li class="sev-${esc(g.severity)}">${sevBadge(g.severity)}${badge} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div></li>`;
+      const t = groupVerdict(g, p);
+      const why = t?.reason ? `<div class="fixline">Claude: ${esc(t.reason)}</div>` : '';
+      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
-    return `<details class="proj" id="p-${esc(p.rel)}"><summary><b>${esc(p.rel)}</b> <span class="muted">${esc(p.name !== p.rel ? p.name : '')}</span><span class="cnt">${prodFirstCount(p.findings) ? `<b class="pf">${prodFirstCount(p.findings)} prod first</b> · ` : ''}${esc(countBySeverity(p.findings) || 'no findings')}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
+    return `<details class="proj" id="p-${esc(p.rel)}"><summary><b>${esc(p.rel)}</b> <span class="muted">${esc(p.name !== p.rel ? p.name : '')}</span><span class="cnt">${prodFirstCount(p.findings) ? `<b class="pf">${prodFirstCount(p.findings)} prod first</b> · ` : ''}${esc(countBySeverity(p.findings) || 'no findings')}${triageCounts([p]).falsePositive ? ` · ${triageCounts([p]).falsePositive} likely false positive` : ''}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
   }).join('\n');
 
   return `<!doctype html>
@@ -268,6 +298,8 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .advlist{list-style:none;margin:0;padding:0}.advlist li{padding:4px 0}
 .fixline{color:var(--muted);font-size:13px;margin-top:2px}
 .sev-none{--c:var(--ok)}.pf{color:var(--critical)}
+.proj li.fp{opacity:.7}
+[hidden]{display:none!important}
 </style>
 </head>
 <body>
@@ -278,7 +310,10 @@ ${BRAND}
 <p class="muted">Dependencies only (npm/yarn audit, and the React bundled in Next.js). Open a project in Gnawky for secrets and code checks.</p>
 <div class="tiles">${tiles}</div>
 <div class="claude"><div class="tile prod-tile" style="cursor:default"><span class="n">${prodFirstTotal}</span><span class="l">Fix for production first</span></div>
-<p>Critical and high findings that ship to production. ${devTotal ? `${devTotal} come only from devDependencies (build, test and lint tools) and are listed last in each project.` : ''} Worked out from package.json; in Next.js projects, devDependencies that aren't test or lint tools count as production, since they can be bundled.</p></div>
+<p>Critical and high findings that ship to production. ${devTotal ? `${devTotal} ${devTotal === 1 ? "comes" : "come"} only from devDependencies (build, test and lint tools) and are listed last in each project.` : ''} Worked out from package.json; in Next.js projects, devDependencies that aren't test or lint tools count as production, since they can be bundled.</p></div>
+${triageLine(result.projects) ? `<p><b>${esc(triageLine(result.projects))}</b> <span class="muted">Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code.</span></p>` : ''}
+
+${allFindings.some((f) => f.scope) ? `<div class="controls"><select id="scope" aria-label="Filter by production"><option value="">All (${allFindings.length})</option><option value="prod"${allFindings.length - devTotal ? '' : ' disabled'}>Production only (${allFindings.length - devTotal})</option><option value="dev"${devTotal ? '' : ' disabled'}>Dev only (${devTotal})</option></select></div>` : ''}
 
 <h2>How they are linked</h2>
 ${linksSection}
@@ -293,6 +328,23 @@ ${throughList ? `<h2>Brought in by your own projects</h2><p class="muted">Adviso
 <h2>Findings per project <span class="muted">(${d.total})</span></h2>
 ${perProject}
 
+<script>
+(function(){
+  var scope=document.getElementById('scope');if(!scope)return;
+  var items=[].slice.call(document.querySelectorAll('[data-tier]'));
+  scope.addEventListener('change',function(){
+    var v=scope.value;
+    items.forEach(function(el){var t=el.dataset.tier;el.hidden=v==='prod'?t==='2':v==='dev'?t!=='2':false;});
+    // A project or package list with nothing left in this filter says so instead of looking empty.
+    [].slice.call(document.querySelectorAll('.proj')).forEach(function(p){
+      var left=p.querySelectorAll('li[data-tier]:not([hidden])').length,all=p.querySelectorAll('li[data-tier]').length;
+      var n=p.querySelector('.none-in-filter');
+      if(all&&!left&&!n){n=document.createElement('li');n.className='none-in-filter muted';n.textContent='Nothing in this filter.';p.querySelector('ul').appendChild(n);}
+      if(n)n.hidden=!(all&&!left);
+    });
+  });
+})();
+</script>
 <footer>Generated by Gnawky. This report lists your projects' weak spots: keep it private.</footer>
 </main>
 </body>
@@ -302,6 +354,7 @@ ${perProject}
 
 /** Saves the result and both reports in <workspace>/.gnawky/. */
 export function writeWorkspaceReports(root, result) {
+  attachTriage(root, result);
   writeWorkspaceResult(root, result);
   fs.writeFileSync(workspaceReportFile(root), renderWorkspaceMarkdown(result) + '\n');
   fs.writeFileSync(workspaceHtmlFile(root), renderWorkspaceHtml(result));

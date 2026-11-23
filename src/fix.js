@@ -2,12 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './scanners.js';
 import { addIgnores } from './finding.js';
-import { PKG_NAME, PKG_VERSION, packageManager, runLabel } from './pm.js';
+import { PKG_NAME, PKG_VERSION, packageManager, runLabel, foreignAuditFindings, auditName } from './pm.js';
 import { applyYarnStep } from './yarn.js';
 import { applyNpmOverride, pinSpec } from './overrides.js';
 import {
   hasNodeModules, installLocked, syncInstall, treeProblems, engineWarnings, runScripts,
 } from './verify.js';
+import { ensureOutDir } from './config.js';
+import { compare as compareVersions, valid as validVersion } from './semver.js';
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]*)?$/;
 const OWN_FILES = ['.gnawky/', '.gnawky-ignore.json'];
@@ -103,11 +105,53 @@ export function preflight(dir) {
   if (git(dir, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
     return 'this folder is not a git repository, so changes could not be rolled back.';
   }
-  const dirty = git(dir, ['status', '--porcelain']).stdout
+  if (uncommittedFiles(dir).length) return DIRTY_PROBLEM;
+  return null;
+}
+
+export const DIRTY_PROBLEM = 'you have uncommitted changes. Commit or stash them first so fixes stay isolated.';
+
+/** `git status --porcelain` lines, without Gnawky's own files. */
+export function uncommittedFiles(dir) {
+  return git(dir, ['status', '--porcelain']).stdout
     .split('\n')
     .filter((l) => l.trim() && !OWN_FILES.some((f) => l.slice(3).startsWith(f)));
-  if (dirty.length) return 'you have uncommitted changes. Commit or stash them first so fixes stay isolated.';
+}
+
+// ---- stashing your own changes for a fix, and giving them back
+
+const STASH_PREFIX = 'gnawky: before fix on ';
+
+/**
+ * Stashes uncommitted changes (untracked files too, but not Gnawky's own) so the fix starts clean.
+ * Returns { ok, error }.
+ */
+export function stashChanges(dir) {
+  const branch = currentRef(dir);
+  // Leave Gnawky's own files out, but only those git sees: an exclude for an ignored path
+  // (.gnawky/ usually is) makes git stash fail halfway.
+  const own = git(dir, ['status', '--porcelain']).stdout.split('\n')
+    .map((l) => l.slice(3).replace(/\/$/, ''))
+    .filter((f) => f && OWN_FILES.some((o) => f.startsWith(o.replace(/\/$/, ''))));
+  const spec = own.length ? ['--', '.', ...own.map((f) => `:(exclude)${f}`)] : [];
+  const r = git(dir, ['stash', 'push', '--include-untracked', '-m', `${STASH_PREFIX}${branch}`, ...spec]);
+  return r.status === 0 ? { ok: true } : { ok: false, error: (r.stderr || r.stdout).trim() };
+}
+
+/** Gnawky's stash for this branch ({ ref: 'stash@{n}', branch }), or null. */
+export function gnawkyStash(dir, branch = currentRef(dir)) {
+  const lines = git(dir, ['stash', 'list', '--format=%gd%x09%s']).stdout.split('\n').filter(Boolean);
+  for (const line of lines) {
+    const [ref, subject] = line.split('\t');
+    if (subject?.endsWith(`${STASH_PREFIX}${branch}`)) return { ref, branch };
+  }
   return null;
+}
+
+/** Puts the stashed changes back (git stash pop). Returns { ok, error }. */
+export function restoreStash(dir, stash) {
+  const r = git(dir, ['stash', 'pop', stash.ref]);
+  return r.status === 0 ? { ok: true } : { ok: false, error: (r.stderr || r.stdout).trim() };
 }
 
 // ------------------------------------------------------------ helpers
@@ -188,8 +232,16 @@ export function fixBranchName(dir, steps) {
 
 // ------------------------------------------------------------ apply
 
-function applyDependencyFixes(dir, plan, log, report, opts) {
-  const problem = preflight(dir);
+/** Why a plan's dependency fixes can't run here, or null: fixes planned from the other package manager's audit. */
+export function planMismatch(dir, plan) {
+  const pm = packageManager(dir);
+  const foreign = foreignAuditFindings(planSteps(plan).flatMap((st) => st.findings ?? []), pm);
+  if (!foreign.length) return null;
+  return `these fixes come from ${foreign[0].tool.replace('-', ' ')} results, but this project uses ${pm === 'yarn' ? 'yarn' : 'npm'} (${auditName(pm)}). Scan again, then fix.`;
+}
+
+async function applyDependencyFixes(dir, plan, log, report, opts) {
+  const problem = planMismatch(dir, plan) ?? preflight(dir);
   if (problem) {
     report.skipped = problem;
     log(`✖ Skipped dependency fixes: ${problem}`);
@@ -220,12 +272,15 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
   report.scripts = scripts;
   const lsBefore = hasNodeModules(dir) ? treeProblems(dir) : null;
 
-  if (scripts.length) {
+  if (scripts.length && opts.baseline && scripts.every((n) => opts.baseline[n])) {
+    // Already run on the starting branch, right before (the app does that, to offer fixing them first).
+    report.baseline = opts.baseline;
+  } else if (scripts.length) {
     log('\nBefore the fix:');
     report.baseline = runScripts(dir, scripts, 'before', log);
   }
   // In one-at-a-time mode, each change is judged by the scripts that passed before it.
-  const guard = opts.oneAtATime ? scripts.filter((n) => report.baseline[n].ok) : [];
+  let guard = opts.oneAtATime ? scripts.filter((n) => report.baseline[n].ok) : [];
 
   log('\nApplying fixes:');
   let npmOutput = '';
@@ -239,9 +294,17 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
     if (!r.ok) {
       entry.status = 'failed';
       entry.error = tail(r.output);
+      entry.command = r.command ?? null;
+      // The whole output, for the user and for Claude (the tail often misses the ERESOLVE details).
+      entry.logFile = path.join(ensureOutDir(dir), `fix-failed-${String(step.package ?? step.kind).replace(/[^\w.-]+/g, '_')}.log`);
+      fs.writeFileSync(entry.logFile, `$ ${entry.command ?? step.label}\n\n${r.output}`);
       log(`  ✖ ${pm} failed:\n${entry.error.replace(/^/gm, '    ')}`);
       restoreDepFiles(dir, snap);
       continue;
+    }
+    // npm audit fix can succeed without changing anything (nothing it may fix without --force).
+    if (!r.skipped && step.kind === 'audit-fix' && JSON.stringify(snapshotDepFiles(dir)) === JSON.stringify(snap)) {
+      r.skipped = 'changed nothing (the rest needs a breaking upgrade, or a step below)';
     }
     if (r.skipped) {
       Object.assign(entry, { status: 'skipped', note: r.skipped });
@@ -249,14 +312,39 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
       continue;
     }
     if (!guard.length) continue;
-    const results = runScripts(dir, guard, `after-${step.id}`, log);
-    const broken = guard.filter((n) => !results[n].ok);
-    if (broken.length) {
-      Object.assign(entry, { status: 'reverted', broke: broken, results });
-      log(`  ↩ Undoing this change: it broke ${broken.map((n) => runLabel(pm, n)).join(', ')}`);
-      restoreDepFiles(dir, snap);
-      syncInstall(dir);
+    let results = runScripts(dir, guard, `after-${step.id}`, log);
+    let broken = guard.filter((n) => !results[n].ok);
+    // Ask what to do (the app: fix it with Claude, keep it, or undo it); without onBreak, undo it.
+    let decision = 'revert';
+    let fixedAfter = false;
+    while (broken.length && opts.onBreak) {
+      decision = await opts.onBreak({
+        step: entry, broken, results, fixedAfter,
+      });
+      if (decision !== 'retry') break;
+      fixedAfter = true;
+      results = { ...results, ...runScripts(dir, broken, `after-${step.id}-retry`, log) };
+      broken = broken.filter((n) => !results[n].ok);
     }
+    if (!broken.length) {
+      if (fixedAfter) {
+        entry.note = 'the scripts it broke were fixed in the code';
+        log('  ✔ The scripts pass again: keeping this change.');
+      }
+      continue;
+    }
+    if (decision === 'keep') {
+      Object.assign(entry, { broke: broken, keptBroken: true, results });
+      for (const n of broken) report.after[n] = results[n];
+      log(`  ⚠ Keeping this change although it breaks ${broken.map((n) => runLabel(pm, n)).join(', ')}`);
+      // Those scripts fail now, so they can't judge the next changes.
+      guard = guard.filter((n) => !broken.includes(n));
+      continue;
+    }
+    Object.assign(entry, { status: 'reverted', broke: broken, results });
+    log(`  ↩ Undoing this change: it broke ${broken.map((n) => runLabel(pm, n)).join(', ')}`);
+    restoreDepFiles(dir, snap);
+    syncInstall(dir);
   }
 
   if (scripts.length && !opts.oneAtATime) {
@@ -275,20 +363,24 @@ function applyDependencyFixes(dir, plan, log, report, opts) {
 /**
  * Applies the plan. Dependency changes go on a new branch; if `scripts` are given,
  * they run before and after so a failure can be told apart from one that already existed.
+ * `baseline`: results of those scripts already run on the starting branch, to skip running them again.
+ * `onBreak({ step, broken, results, fixedAfter })`: in one-at-a-time mode, called when a change breaks
+ * scripts; resolves to 'retry' (the code was changed, run them again), 'keep' or 'revert' (the default).
  */
-export function applyPlan(dir, plan, log = console.log, { scripts = [], oneAtATime = false } = {}) {
+export async function applyPlan(dir, plan, log = console.log, { scripts = [], oneAtATime = false, baseline = null, onBreak = null } = {}) {
   const report = {
     branch: null, base: null, skipped: null, scriptsSkipped: null, oneAtATime,
     scripts: [], baseline: {}, after: {}, steps: [], lsNew: [], lsPreexisting: 0, engines: [], diffStat: '',
   };
-  if (hasDependencyChanges(plan)) applyDependencyFixes(dir, plan, log, report, { scripts, oneAtATime });
+  if (hasDependencyChanges(plan)) await applyDependencyFixes(dir, plan, log, report, { scripts, oneAtATime, baseline, onBreak });
   if (plan.ignores.length) log(`✔ Saved ${plan.ignores.length} ignore decision(s) to ${addIgnores(dir, plan.ignores)}`);
   return report;
 }
 
 /** Scripts that passed before the fix and fail after it. */
 export function regressions(report) {
-  if (report.oneAtATime) return [];
+  // One at a time: only the scripts a change broke and the user chose to keep anyway.
+  if (report.oneAtATime) return [...new Set(report.steps.filter((st) => st.keptBroken).flatMap((st) => st.broke))];
   return report.scripts.filter((n) => report.baseline[n]?.ok && report.after[n] && !report.after[n].ok);
 }
 
@@ -307,4 +399,26 @@ export function undoFix(dir, report, log = console.log) {
     syncInstall(dir);
   }
   return true;
+}
+
+/** The version of `name` installed now (node_modules, else package-lock), or null. */
+export function installedNow(dir, name) {
+  const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+  return read(path.join(dir, 'node_modules', name, 'package.json'))?.version
+    ?? read(path.join(dir, 'package-lock.json'))?.packages?.[`node_modules/${name}`]?.version
+    ?? null;
+}
+
+/** A failed upgrade step that is in place now (done by hand or with Claude): installed ≥ its version. */
+export function upgradeNowInPlace(dir, step) {
+  if (!step.package || !validVersion(step.version ?? '')) return false;
+  const v = installedNow(dir, step.package);
+  return Boolean(v && validVersion(v) && compareVersions(v, step.version) >= 0);
+}
+
+/** The line that says why npm failed ("ERESOLVE could not resolve", "notarget …"), or ''. */
+export function npmErrorHeadline(output) {
+  const lines = String(output ?? '').split('\n').map((l) => l.replace(/^npm (error|ERR!)\s*/, '').trim()).filter(Boolean);
+  return lines.find((l) => /ERESOLVE|ETARGET|notarget|E404|EBADENGINE|peer dep|Could not resolve|conflicting/i.test(l))
+    ?? lines.find((l) => !/^(A complete log|code |\$ )/.test(l)) ?? '';
 }

@@ -14,13 +14,14 @@ import {
 import { SEVERITY_ORDER, loadIgnores, addIgnores, removeIgnore } from './finding.js';
 import {
   loadTriage, runTriage, triageItems, batchCount, triageOrder, secretDenyRules, VERDICTS, URGENCIES,
-  findingSource, TRIAGE_SOURCES, MAX_PARALLEL, triageEstimate,
+  findingSource, TRIAGE_SOURCES, MAX_PARALLEL, triageEstimate, falsePositivesLast, isLikelyFalsePositive,
 } from './triage.js';
 import {
   AUDIT_TOOL, PLUGIN_DIR, latestAudit, auditCounts, nextAuditRun, recordAuditRun, buildAuditTask, scanAudit,
 } from './audit.js';
 import {
   isAutoFixable, emptyPlan, planSize, addFixToPlan, describePlan, preflight, applyPlan, hasDependencyChanges,
+  DIRTY_PROBLEM, planMismatch, uncommittedFiles, stashChanges, gnawkyStash, restoreStash, upgradeNowInPlace, npmErrorHeadline,
   planSteps, regressions, undoFix, isForced,
 } from './fix.js';
 import { isAvailable, IS_WIN, scanDependencies } from './scanners.js';
@@ -36,16 +37,17 @@ import {
   PROFILES, SCOPE_MODES, projectFiles, buildTree, itemsOf, stateOf, toggle, selectedCount, validKeys, shortKey, scopeSummary,
 } from './scope.js';
 import {
-  packageManager, lockfileName, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS,
+  packageManager, detectPackageManager, foreignAuditFindings, lockfileName, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS,
 } from './pm.js';
 import {
   scopeText, groupScopeText, shipsToProd, isProdFirst, prodFirstCount, priorityTier,
 } from './prod.js';
 import {
   startScripts, guessUrl, validUrl, parsePaths, urlAnswers, waitForUrl, startServer, reportPath, readResult, buildSmokeTask,
+  saveFixBranch, fixBranchFor, clearFixBranch, reportFromFixBranch,
 } from './smoke.js';
 import {
-  detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
+  detectScripts, runScript, runScripts, describeResult, packagesWithInstallScripts, diffFindings, rebuild, hasNodeModules,
 } from './verify.js';
 
 // ------------------------------------------------------------------ helpers
@@ -84,11 +86,15 @@ function header(s, { logo = false, below } = {}) {
   } else {
     console.log(`${wordmark()}  ${c.bold(name)}  ${c.gray(s.dir)}`);
   }
-  const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
+  const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}${fromWorkspaceScan(s) ? c.gray(' (workspace, dependencies only)') : ''}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
   const first = s.result ? prodFirstCount(s.result.findings) : 0;
   if (first) bits.push(c.bold(c.red(`${first} to fix for production first`)));
+  const fb = fixBranchHere(s);
+  if (fb) bits.push(c.yellow(`on fix branch ${fb.branch}${fb.smoke ? ` (smoke test: ${fb.smoke.result})` : ', not smoke-tested'}`));
   if (s.cfg.offline) bits.push(c.yellow('offline mode'));
-  if (s.stale && s.result) bits.push(c.yellow('results may be out of date, rescan'));
+  if (s.result && foreignAuditFindings(s.result.findings, s.pm).length) {
+    bits.push(c.bold(c.yellow(`these results come from ${foreignAuditFindings(s.result.findings, s.pm)[0].tool.replace('-', ' ')}, but this project uses ${s.pm === 'yarn' ? 'yarn' : 'npm'}: scan again before fixing`)));
+  } else if (s.stale && s.result) bits.push(c.yellow('results may be out of date, rescan'));
   if (!s.pkg) bits.push(c.yellow('no package.json here'));
   console.log(bits.join(c.gray('  ·  ')));
   console.log(c.gray('─'.repeat(Math.min(process.stdout.columns || 60, 72))));
@@ -351,14 +357,63 @@ async function detailScreen(s, f) {
   }
 }
 
+/**
+ * Before Review & fix: when Claude hasn't triaged any finding yet, offer a triage first (once per
+ * session; "don't ask again" is saved per project). Returns 'review' to review in Claude's order,
+ * 'plain' for the usual order, or null when the user backs out.
+ */
+async function offerTriage(s) {
+  if (s.triageOffered || s.cfg.askTriage === false || s.cfg.offline || IS_WIN || !isAvailable('claude')) return 'plain';
+  const all = triageable(s);
+  const fresh = all.filter((f) => !s.triage.entries[f.fingerprint]);
+  if (!fresh.length) return 'plain';
+  // Triaged before: ask only about new findings that the last triage's filter would have covered
+  // (e.g. a new critical advisory after a rescan), not about the ones left out on purpose.
+  const f0 = s.cfg.triageFilter;
+  const partly = fresh.length < all.length;
+  const todo = partly
+    ? (f0 ? fresh.filter((f) => f0.severities.includes(f.severity) && f0.sources.includes(findingSource(f)) && (f0.scopes ?? SCOPE_ROWS).includes(scopeKey(f))) : [])
+    : fresh;
+  if (!todo.length) return 'plain';
+  s.triageOffered = true;
+  header(s);
+  console.log(c.bold(partly
+    ? `Claude hasn't triaged ${todo.length} new finding(s) that match your last triage (${f0.severities.join(', ')}).\n`
+    : `Claude hasn't triaged these ${all.length} finding(s) yet.\n`));
+  console.log('  A triage has Claude read your code and say, for each finding, whether it\'s a real issue');
+  console.log('  here and how urgent it is. Likely false positives then move to the end of Review & fix,');
+  console.log('  so you fix what matters first. You see what it checks, the cost and the privacy notes first.\n');
+  const pick = await select('Run a Claude triage before Review & fix?', [
+    { label: 'Yes, triage first', value: 'triage' },
+    { label: 'No, review now', value: 'plain' },
+    { label: 'No, and don\'t ask again for this project', value: 'never' },
+  ]);
+  if (pick === null) return null;
+  if (pick === 'never') {
+    s.cfg.askTriage = false;
+    saveConfig(s.dir, s.cfg);
+    return 'plain';
+  }
+  if (pick === 'plain') return 'plain';
+  const next = await triageScreen(s, { fromReview: true });
+  // Backed out of the triage before it ran: review as usual.
+  return next ?? 'plain';
+}
+
 async function reviewScreen(s, { claudeOrder = false } = {}) {
+  // New findings without a verdict can come up in either order (e.g. after a rescan).
+  const next = await offerTriage(s);
+  if (next === null) return;
+  if (next === 'review') claudeOrder = true;
   const plan = emptyPlan();
-  const list = groupFindings(claudeOrder ? triageOrder(s.result.findings, s.triage) : [...s.result.findings]);
+  // Likely false positives (Claude triage) go last in both orders: real issues come first.
+  const list = falsePositivesLast(groupFindings(claudeOrder ? triageOrder(s.result.findings, s.triage) : [...s.result.findings]), s.triage);
   for (const [i, g] of list.entries()) {
     header(s);
     const what = list.length === s.result.findings.length ? 'Finding' : 'Item';
     const tier = Math.min(...g.findings.map(priorityTier));
-    const stage = ['fix for production first', 'ships to production', 'dev only'][tier];
+    const fp = g.findings.every((f) => isLikelyFalsePositive(f, s.triage));
+    const stage = fp ? 'likely false positive (Claude triage)' : ['fix for production first', 'ships to production', 'dev only'][tier];
     console.log(c.gray(`${what} ${i + 1} of ${list.length}   ·   ${stage}   ·   planned so far: ${describePlan(plan).length} change(s)\n`));
     printGroup(g, s.triage);
     const auto = g.findings.filter(isAutoFixable);
@@ -418,13 +473,27 @@ async function confirmAndApply(s, plan) {
   console.log(c.bold('Here is what will happen:\n'));
   for (const line of describePlan(plan)) console.log(`  • ${line}`);
   const deps = hasDependencyChanges(plan);
-  const problem = deps ? preflight(s.dir) : null;
+  let problem = deps ? (planMismatch(s.dir, plan) ?? preflight(s.dir)) : null;
+  if (problem === DIRTY_PROBLEM) {
+    const stashed = await stashScreen(s, plan);
+    if (stashed === null) return;
+    if (stashed) problem = preflight(s.dir);
+  }
   if (deps) {
     console.log(problem
       ? c.yellow(`\n  ⚠ Dependency fixes will be skipped: ${problem}`)
       : c.gray('\n  Dependency changes are made on a new git branch, with install scripts disabled.'));
+    const d = detectPackageManager(s.dir);
+    if (!problem && d.why) {
+      console.log(c.gray(`  Uses ${d.pm === 'npm' ? 'npm' : 'yarn'}, because ${d.why} (also found: ${d.others.join(', ')}).`));
+    }
   }
   console.log();
+  if (deps && problem && !plan.ignores.length) {
+    console.log('Nothing else is in this plan, so nothing was changed.');
+    await pause();
+    return;
+  }
   let opts = { scripts: [], oneAtATime: false };
   if (deps && !problem) {
     opts = await chooseVerification(s, plan);
@@ -436,10 +505,206 @@ async function confirmAndApply(s, plan) {
     return;
   }
   console.log();
-  const report = applyPlan(s.dir, plan, (m) => console.log(m), opts);
+  // Run the scripts on the current code first: if they already fail, offer to fix them before
+  // any dependency change, since Gnawky can't tell otherwise whether the fix breaks them.
+  if (opts.scripts.length && hasNodeModules(s.dir)) {
+    const baseline = await baselineScreen(s, opts.scripts);
+    if (!baseline) return;
+    opts = { ...opts, baseline };
+  }
+  const report = await applyPlan(s.dir, plan, (m) => console.log(m), { ...opts, onBreak: (info) => breakScreen(s, info) });
   if (plan.ignores.length) dropFromResult(s, plan.ignores.map((i) => i.finding.fingerprint));
   if (report.branch) return verifyScreen(s, report);
   await pause();
+}
+
+/**
+ * Uncommitted changes block a dependency fix (it needs a clean branch). Offers to stash them and
+ * give them back afterwards. Returns true (stashed), false (go on without the dependency fixes)
+ * or null (cancel).
+ */
+async function stashScreen(s, plan) {
+  const files = uncommittedFiles(s.dir);
+  const base = gitOut(s.dir, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+  console.log(c.yellow(`\n  ⚠ You have uncommitted changes on ${base}:`));
+  for (const l of files.slice(0, 8)) console.log(c.gray(`      ${l}`));
+  if (files.length > 8) console.log(c.gray(`      … and ${files.length - 8} more`));
+  console.log(c.gray('    The fix goes on a new branch from a clean state, so your changes don\'t end up in it.\n'));
+  const onlyDeps = !plan.ignores.length;
+  const choice = await select('What now?', [
+    { label: `Stash them and continue (Gnawky gives them back when you're on ${base} again)`, value: 'stash' },
+    ...(onlyDeps ? [] : [{ label: 'Continue without the dependency fixes (only save the ignores)', value: 'skip' }]),
+    { label: 'Cancel (commit or stash them yourself first)', value: null },
+  ]);
+  if (choice === null) return null;
+  if (choice === 'skip') return false;
+  const r = stashChanges(s.dir);
+  if (!r.ok) {
+    console.log(c.red(`\n✖ git stash failed: ${r.error}`));
+    await pause();
+    return null;
+  }
+  console.log(c.green(`\n  ✔ Stashed your changes ("gnawky: before fix on ${base}" in git stash list).`));
+  return true;
+}
+
+/** Gives back the changes stashed before a fix, when on their branch again. */
+async function restoreStashScreen(s) {
+  const st = gnawkyStash(s.dir);
+  if (!st) return;
+  header(s);
+  const r = restoreStash(s.dir, st);
+  if (r.ok) console.log(c.green(`✔ Your changes from before the fix are back on ${st.branch}.`));
+  else {
+    console.log(c.red(`✖ git stash pop failed:\n${r.error}`));
+    console.log(c.gray(`\nThe stash is kept. Resolve it with git (git stash list, git stash pop ${st.ref}).`));
+  }
+  await pause();
+}
+
+const gitOut = (dir, args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+
+/** Changed files outside .gnawky/, from git status. */
+function changedFiles(dir) {
+  return gitOut(dir, ['status', '--porcelain']).stdout.split('\n')
+    .filter((l) => l.trim() && !l.slice(3).startsWith(`${OUT_DIR}/`) && l.slice(3) !== '.gnawky-ignore.json');
+}
+
+/**
+ * Runs the verify scripts on the current code, before any change. When some already fail, the
+ * user can have Claude fix them first, re-run them, or go on anyway. Returns the results to
+ * reuse as the fix's "before" run, or null to stop (nothing changed).
+ */
+async function baselineScreen(s, scripts) {
+  for (;;) {
+    const branch = gitOut(s.dir, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+    console.log(c.bold(`Before the fix (on ${branch}, nothing changed yet):`));
+    const results = runScripts(s.dir, scripts, 'before', (m) => console.log(m));
+    const failed = scripts.filter((n) => !results[n].ok);
+    if (!failed.length) return results;
+
+    for (;;) {
+      header(s);
+      console.log(c.bold(c.yellow(`${failed.map((n) => runLabel(s.pm, n)).join(', ')} already fail${failed.length === 1 ? 's' : ''} before any change.\n`)));
+      console.log('If you go on, Gnawky can\'t tell whether the fix breaks them. Fixing them first, in a');
+      console.log(`separate commit on ${branch}, keeps the security fix clean and checkable.\n`);
+      for (const n of failed) {
+        console.log(c.gray(`${runLabel(s.pm, n)}, last lines (full log: ${path.relative(s.dir, results[n].logFile)}):`));
+        console.log(c.gray(results[n].tail.split('\n').slice(-8).join('\n')) + '\n');
+      }
+      const choice = await select('What now?', [
+        { label: 'Fix them first with Claude (no dependency is changed yet)', value: 'claude', disabled: s.cfg.offline },
+        { label: 'Run them again (after fixing them yourself)', value: 'rerun' },
+        { label: `Go on with the fix anyway (only ${scripts.filter((n) => results[n].ok).map((n) => runLabel(s.pm, n)).join(', ') || 'the dependency checks'} will tell if it breaks something)`, value: 'go' },
+        { label: 'Cancel (nothing was changed)', value: null },
+      ]);
+      if (choice === null) return null;
+      if (choice === 'go') return results;
+      if (choice === 'rerun') {
+        header(s);
+        break;
+      }
+      // claude
+      const before = new Set(changedFiles(s.dir));
+      await launchClaude(s, buildTestFixPrompt(s, failed, results, branch));
+      const changed = changedFiles(s.dir).filter((l) => !before.has(l));
+      header(s);
+      if (changed.length) {
+        console.log(c.bold('Claude changed these files:\n'));
+        for (const l of changed.slice(0, 20)) console.log(`  ${l}`);
+        if (changed.length > 20) console.log(c.gray(`  … and ${changed.length - 20} more`));
+        console.log(c.gray('\n  The dependency fix needs a clean working tree, so these must be committed first.\n'));
+        const next = await select('Commit them?', [
+          { label: `Commit them on ${branch} ("Fix failing ${failed.join(', ')} before dependency upgrades")`, value: 'commit' },
+          { label: 'Not now: I\'ll review and commit them myself, then start the fix again', value: null },
+        ]);
+        if (!next) return null;
+        const files = changed.map((l) => l.slice(3).replace(/^.* -> /, ''));
+        const add = gitOut(s.dir, ['add', '-A', '--', ...files]);
+        const commit = add.status === 0 && gitOut(s.dir, ['commit', '-m', `Fix failing ${failed.join(', ')} before dependency upgrades`]);
+        if (!commit || commit.status !== 0) {
+          console.log(c.red(`\n✖ git commit failed:\n${((commit || add).stderr || '').trim()}`));
+          await pause();
+          return null;
+        }
+        console.log(c.green(`\n✔ Committed on ${branch}.\n`));
+      }
+      break; // run the scripts again
+    }
+  }
+}
+
+/**
+ * One at a time: a change broke scripts that passed before it. Fix the code with Claude (then the
+ * scripts run again), run them again after a manual fix, undo the change, or keep it anyway.
+ */
+async function breakScreen(s, { step, broken, results, fixedAfter }) {
+  const runs = broken.map((n) => runLabel(s.pm, n)).join(', ');
+  for (;;) {
+    header(s);
+    console.log(c.bold(c.yellow(`${step.label} ${fixedAfter ? 'still breaks' : 'breaks'} ${runs}.\n`)));
+    console.log(`${broken.length === 1 ? 'It' : 'They'} passed before this change. Often the new version only needs a small change`);
+    console.log('in your code, tests or config (a renamed option, a new default…).\n');
+    for (const n of broken) {
+      console.log(c.gray(`${runLabel(s.pm, n)}, last lines (full log: ${path.relative(s.dir, results[n].logFile)}):`));
+      console.log(c.gray(results[n].tail.split('\n').slice(-8).join('\n')) + '\n');
+    }
+    const choice = await select('What now?', [
+      { label: 'Fix it with Claude: adapt the code to the new version, then run the scripts again', value: 'claude', disabled: s.cfg.offline },
+      { label: 'Run them again (after changing the code yourself)', value: 'retry' },
+      { label: 'Undo this change and go on with the next one', value: 'revert' },
+      { label: `Keep it anyway (${runs} stay${broken.length === 1 ? 's' : ''} broken, fix it later)`, value: 'keep' },
+    ]);
+    if (choice === null || choice === 'revert') return 'revert';
+    if (choice === 'retry' || choice === 'keep') {
+      if (choice === 'retry') header(s);
+      return choice;
+    }
+    if (await launchClaude(s, buildBreakPrompt(s, step, broken, results))) {
+      header(s);
+      console.log(c.bold(`Running ${runs} again…`));
+      return 'retry';
+    }
+  }
+}
+
+function buildBreakPrompt(s, step, broken, results) {
+  const logs = broken.map((n) => `- \`${runLabel(s.pm, n)}\`: \`${path.relative(s.dir, results[n].logFile)}\``).join('\n');
+  return `# Adapt the code to a dependency upgrade (started by Gnawky)
+
+Gnawky is upgrading dependencies one at a time to fix security vulnerabilities, on the current git branch. This change:
+- ${step.label}
+
+made these package.json scripts fail. They passed right before it:
+${logs}
+
+Find out why: read the logs, find what changed in the upgraded package (renamed or removed APIs, new defaults, config format, peer dependencies), and the code, tests or config in this project that it affects. Then fix the project so the scripts pass with the new version. Prefer the smallest change. If it can't reasonably be fixed in the project (for example the new version drops something the project needs), say so and recommend undoing this upgrade instead; don't force it.
+
+Rules. Follow them strictly:
+- Show me each change and wait for my approval before writing it.
+- You may run the failing scripts to check your fix (${broken.map((n) => `\`${runLabel(s.pm, n)}\``).join(', ')}).
+- Don't change package.json dependencies or the lockfile, and don't run installs, \`npm audit fix\`, install scripts (\`npm rebuild\`), \`git commit\` or \`git push\`.
+- Don't open .env files, private keys or credentials, and never print secret values.
+- When done, tell me in a few lines what you changed, and that I can exit (/exit) to go back to Gnawky, which runs the scripts again and keeps the upgrade if they pass.
+`;
+}
+
+function buildTestFixPrompt(s, failed, results, branch) {
+  const logs = failed.map((n) => `- \`${runLabel(s.pm, n)}\`: \`${path.relative(s.dir, results[n].logFile)}\``).join('\n');
+  return `# Fix scripts that already fail, before a dependency upgrade (started by Gnawky)
+
+Gnawky is about to upgrade dependencies to fix security vulnerabilities. It runs these package.json scripts before and after the upgrade to see whether the upgrade breaks anything, but they already fail now, on \`${branch}\`, before any change:
+${logs}
+
+Find out why each one fails (read the log, then the code and config it points at) and fix it, so the scripts pass on the current dependencies. Don't upgrade, add or remove dependencies: that's the next step, and it has to stay separate. If a failure can't be fixed in the code (it needs a service, a secret or a network that isn't there), say so and suggest how to run the script without it.
+
+Rules. Follow them strictly:
+- Show me each change and wait for my approval before writing it.
+- You may run the failing scripts to check your fix (${failed.map((n) => `\`${runLabel(s.pm, n)}\``).join(', ')}).
+- Don't change package.json dependencies or the lockfile, and don't run installs, \`npm audit fix\`, \`git commit\` or \`git push\`. Gnawky offers to commit when you're done.
+- Don't open .env files, private keys or credentials, and never print secret values.
+- When done, tell me in a few lines what you changed, and that I can exit (/exit) to go back to Gnawky, which runs the scripts again.
+`;
 }
 
 /** Asks which package.json scripts should verify the fix. Returns null if the user backs out. */
@@ -466,8 +731,8 @@ async function chooseVerification(s, plan) {
   if (scripts.length && planSteps(plan).length > 1) {
     console.log();
     const mode = await select('How should the fixes be applied?', [
+      { label: 'One package at a time: run the scripts after each, and ask what to do if one breaks them (slower)', value: 'one' },
       { label: 'All at once, then run the scripts (faster)', value: 'all' },
-      { label: 'One package at a time: run the scripts after each, undo any change that breaks them (slower)', value: 'one' },
     ]);
     if (mode === null) return null;
     oneAtATime = mode === 'one';
@@ -488,10 +753,15 @@ function printVerifyReport(pm, report, audit) {
   console.log(c.bold('Changes'));
   for (const st of report.steps) {
     const label = `${st.label}${st.major ? c.yellow('  (major)') : ''}`;
-    if (st.status === 'applied') ok(`${label}  ${c.gray(`${st.findings} finding(s)`)}`);
+    if (st.status === 'applied' && st.keptBroken) warn(`${label}  ${c.yellow(`kept, but it breaks ${st.broke.map(runs).join(', ')}`)}`);
+    else if (st.status === 'applied') ok(`${label}  ${c.gray(`${st.findings} finding(s)${st.note ? `  ·  ${st.note}` : ''}`)}`);
     else if (st.status === 'skipped') ok(`${label}  ${c.gray(st.note)}`);
     else if (st.status === 'reverted') warn(`${label}  ${c.yellow(`undone: it broke ${st.broke.map(runs).join(', ')}`)}`);
-    else bad(`${label}  ${c.red(`${pm === 'yarn' ? 'yarn' : 'npm'} failed, not applied`)}`);
+    else {
+      bad(`${label}  ${c.red(`${pm === 'yarn' ? 'yarn' : 'npm'} failed, not applied`)}`);
+      const why = npmErrorHeadline(st.error);
+      if (why) sub(why.length > 110 ? `${why.slice(0, 107)}…` : why);
+    }
   }
 
   console.log(`\n${c.bold('Compatibility')}`);
@@ -511,7 +781,9 @@ function printVerifyReport(pm, report, audit) {
   if (audit) {
     console.log(`\n${c.bold(auditName(pm))}`);
     const line = `fixed ${audit.fixed.length}  ·  still open ${audit.remaining.length}`;
-    if (audit.added.length) {
+    if (!audit.fixed.length && audit.remaining.length && !audit.added.length) {
+      warn(`${line}  ${c.gray('· nothing was fixed')}`);
+    } else if (audit.added.length) {
       warn(`${line}  ·  ${c.yellow(`new ${audit.added.length}`)}`);
       for (const f of audit.added.slice(0, 5)) console.log(`      ${sevTag(f.severity)} ${f.title}`);
       sub('New ones usually come from the upgraded packages\' own dependencies. Rescan and review them.');
@@ -530,7 +802,8 @@ function printVerifyReport(pm, report, audit) {
       const before = report.baseline[n];
       const after = report.after[n];
       if (report.oneAtATime) {
-        if (before.ok) ok(`${runs(n)}  ${c.gray('passed before, and after every change that was kept')}`);
+        if (after && !after.ok) bad(`${runs(n)}  ${c.red('FAILS after a change you kept')}`);
+        else if (before.ok) ok(`${runs(n)}  ${c.gray('passed before, and after every change that was kept')}`);
         else warn(`${runs(n)}  ${c.gray('was already failing before the fix, so it could not judge the changes')}`);
       } else if (before.ok && after.ok) ok(`${runs(n)}  ${c.gray('passed before and after')}`);
       else if (before.ok) bad(`${runs(n)}  ${c.red(`passed before, ${after.timedOut ? 'TIMES OUT' : 'FAILS'} after the fix`)}`);
@@ -540,17 +813,24 @@ function printVerifyReport(pm, report, audit) {
   }
 
   const broken = regressions(report);
+  const failedSteps = report.steps.filter((st) => st.status === 'failed');
   console.log();
   if (broken.length) console.log(c.bold(c.red(`✖ The fix broke: ${broken.map(runs).join(', ')}`)));
   else if (report.scripts.length && !report.lsNew.length) console.log(c.bold(c.green('✔ Everything that worked before still works.')));
+  if (failedSteps.length) {
+    console.log(c.bold(c.red(`✖ Not applied: ${failedSteps.map((st) => st.label).join(', ')}.`)));
+    console.log(c.gray('  Its advisories are still open. See why below, or have Claude help with the upgrade.'));
+  }
   console.log();
 }
 
 /** After a dependency fix: show the checks, then keep, undo, or dig into failures. */
 async function verifyScreen(s, report) {
+  saveFixBranch(s.dir, report);
   let audit = null;
   let auditAll = null;
-  if (!s.cfg.offline && s.cfg.scanners['npm-audit'] !== false) {
+  const runAudit = async () => {
+    if (s.cfg.offline || s.cfg.scanners['npm-audit'] === false) return;
     console.log();
     const done = ticker(`running ${auditName(s.pm)} again`);
     const res = await scanDependencies(s.dir);
@@ -559,7 +839,8 @@ async function verifyScreen(s, report) {
       auditAll = filterFindings(s.dir, s.cfg, res.findings);
       audit = diffFindings(s.result.findings.filter(isDepAudit), auditAll);
     }
-  }
+  };
+  await runAudit();
 
   for (;;) {
     header(s);
@@ -567,24 +848,80 @@ async function verifyScreen(s, report) {
     const broken = regressions(report);
     const failed = report.scripts.filter((n) => report.after[n] && !report.after[n].ok);
     const native = broken.length ? packagesWithInstallScripts(s.dir) : [];
+    const failedSteps = report.steps.filter((st) => st.status === 'failed');
     if (report.smoke) printSmokeResult(s, report.smoke);
     const choice = await select('What now?', [
       { label: 'Keep the changes on this branch', value: 'keep' },
       { label: `Undo everything (back to ${report.base}, delete the branch)`, value: 'undo' },
       { label: report.smoke ? 'Smoke test in the browser again' : 'Smoke test in the browser with Claude (optional)', value: 'smoke', disabled: s.cfg.offline },
+      ...(failedSteps.length ? [
+        { label: `Fix the failed upgrade with Claude (${failedSteps.map((st) => st.package ?? st.label).join(', ')}; then Gnawky checks again)`, value: 'claudeUpgrade', disabled: s.cfg.offline },
+        { label: `Show why ${failedSteps.length === 1 ? 'it' : 'they'} failed (${s.pm === 'yarn' ? 'yarn' : 'npm'} output)`, value: 'stepOutput' },
+      ] : []),
       ...(failed.length ? [{ label: 'Show the output of the failed scripts', value: 'output' }] : []),
       ...(broken.length && native.length
         ? [{ label: `Run npm rebuild, then retry (runs install scripts of ${native.length} package(s))`, value: 'rebuild' }] : []),
-      ...(broken.length ? [{ label: 'Ask Claude to investigate the failure', value: 'claude', disabled: s.cfg.offline }] : []),
+      ...(broken.length ? [{ label: 'Fix it with Claude (then Gnawky runs the failing scripts again)', value: 'claude', disabled: s.cfg.offline }] : []),
     ]);
 
     if (choice === 'undo') {
-      if (!(await confirm(`Throw away all changes on ${report.branch}?`))) continue;
+      // Code changes (e.g. Claude's) aren't part of the dependency fix: Undo leaves them alone.
+      const other = changedFiles(s.dir).map((l) => l.slice(3)).filter((f) => !/(^|\/)(package\.json|package-lock\.json|yarn\.lock|npm-shrinkwrap\.json)$/.test(f));
+      if (other.length) {
+        console.log(c.yellow(`\n  Other changed files stay as they are (uncommitted, they come along to ${report.base}):`));
+        for (const f of other.slice(0, 10)) console.log(c.gray(`    ${f}`));
+        if (other.length > 10) console.log(c.gray(`    … and ${other.length - 10} more`));
+        console.log(c.gray('  To throw them away too: git checkout -- <file>  (or git stash)\n'));
+      }
+      if (!(await confirm(`Throw away all dependency changes on ${report.branch}?`))) continue;
       console.log();
-      undoFix(s.dir, report, (m) => console.log(m));
+      if (undoFix(s.dir, report, (m) => console.log(m))) {
+        clearFixBranch(s.dir);
+        const st = gnawkyStash(s.dir);
+        if (st) {
+          const r = restoreStash(s.dir, st);
+          console.log(r.ok ? `✔ Your changes from before the fix are back on ${st.branch}.`
+            : c.red(`✖ Could not give back your stashed changes (${r.error.split('\n')[0]}). They're still in git stash list.`));
+        }
+      }
       s.stale = false;
       await pause();
       return;
+    }
+    if (choice === 'stepOutput') {
+      header(s);
+      for (const st of failedSteps) {
+        console.log(c.bold(st.label) + c.gray(`  ${st.command ? `($ ${st.command})` : ''}`));
+        console.log(st.error + '\n');
+        if (st.logFile) console.log(c.gray(`Full output: ${path.relative(s.dir, st.logFile)}\n`));
+      }
+      await pause();
+      continue;
+    }
+    if (choice === 'claudeUpgrade') {
+      if (!(await launchClaude(s, buildUpgradeHelpPrompt(s, report, failedSteps)))) continue;
+      header(s);
+      // What Claude (or you) changed: is the upgrade in place now?
+      for (const st of failedSteps) {
+        if (upgradeNowInPlace(s.dir, st)) {
+          Object.assign(st, { status: 'applied', note: 'applied with Claude' });
+          console.log(c.green(`✔ ${st.label}: in place now.`));
+        } else {
+          console.log(c.yellow(`⚠ ${st.label}: still not in place.`));
+        }
+      }
+      if (report.scripts.length) {
+        console.log(c.bold('\nRunning your scripts again…'));
+        report.after = runScripts(s.dir, report.scripts, 'after-claude', (m) => console.log(m));
+        // From here on, compare every script before / after, as with "all at once".
+        report.oneAtATime = false;
+        for (const st of report.steps) if (st.keptBroken) st.keptBroken = false;
+      }
+      await runAudit();
+      report.diffStat = gitOut(s.dir, ['diff', '--stat']).stdout.trim();
+      saveFixBranch(s.dir, report);
+      await pause();
+      continue;
     }
     if (choice === 'output') {
       header(s);
@@ -611,7 +948,22 @@ async function verifyScreen(s, report) {
       continue;
     }
     if (choice === 'claude') {
-      await launchClaude(s, buildVerifyPrompt(s, report, broken));
+      if (await launchClaude(s, buildVerifyPrompt(s, report, broken))) {
+        header(s);
+        console.log(c.bold('Running the failing scripts again…'));
+        for (const n of broken) {
+          console.log(c.gray(`  running ${runLabel(s.pm, n)}…`));
+          report.after[n] = runScript(s.dir, n, 'after-claude');
+          console.log(`    ${describeResult(report.after[n])}`);
+        }
+        // One at a time: a script that passes again no longer counts against the change kept.
+        for (const st of report.steps) {
+          if (!st.keptBroken) continue;
+          st.broke = st.broke.filter((n) => !report.after[n]?.ok);
+          if (!st.broke.length) Object.assign(st, { keptBroken: false, note: 'the scripts it broke were fixed in the code' });
+        }
+        await pause();
+      }
       continue;
     }
     if (choice === 'smoke') {
@@ -638,8 +990,16 @@ async function verifyScreen(s, report) {
     console.log('  1. Review the changes:  git diff');
     console.log('  2. If a package needs a build step:  npm rebuild');
     const files = `package.json ${lockfileName(s.pm)}`;
-    console.log(`  3. Commit on this branch:  git add ${files} && git commit -m "Fix vulnerable dependencies"`);
+    // Code adapted to the upgrade (by Claude or by hand) belongs in the same commit.
+    const code = changedFiles(s.dir).map((l) => l.slice(3)).filter((f) => !/(^|\/)(package\.json|package-lock\.json|yarn\.lock|npm-shrinkwrap\.json)$/.test(f));
+    if (code.length) console.log(`  ${c.gray(`Also changed: ${code.slice(0, 6).join(', ')}${code.length > 6 ? ', …' : ''}`)}`);
+    console.log(`  3. Commit on this branch:  git add ${files}${code.length ? ` ${code.slice(0, 6).join(' ')}${code.length > 6 ? ' …' : ''}` : ''} && git commit -m "Fix vulnerable dependencies"`);
     console.log(c.gray(`  To throw it all away:  git checkout -- ${files} && git checkout ${report.base} && git branch -D ${report.branch}`));
+    if (gnawkyStash(s.dir, report.base)) {
+      console.log(c.yellow(`\n  Your own changes are stashed. Back on ${report.base}, Gnawky offers to restore them`));
+      console.log(c.gray(`  (or: git checkout ${report.base} && git stash pop).`));
+    }
+    if (!report.smoke && !s.cfg.offline) console.log(c.gray(`\n  Smoke test it in the browser later: start Gnawky on ${report.branch} and pick it from the menu.`));
     await pause();
     return;
   }
@@ -697,6 +1057,9 @@ async function smokeScreen(s, report) {
     console.log(`  App URL     ${cfg.url}`);
     console.log(`  Started by  ${cfg.start === 'self' ? 'you' : `Gnawky (${runLabel(s.pm, cfg.script)})`}`);
     console.log(`  Pages       ${cfg.paths.join(', ')}`);
+    const changes = report.steps.filter((st) => st.status === 'applied').map((st) => st.label);
+    console.log(`  Changes     ${changes.length ? changes.slice(0, 4).join(', ') + (changes.length > 4 ? `, +${changes.length - 4} more` : '') : c.gray('none found in package.json; Claude will check git diff')}`);
+    if (report.guessed) console.log(c.gray(`              (read from package.json against ${report.base}; Gnawky didn't make this branch, or made it before it remembered fix branches)`));
     console.log(c.gray('\n  Needs Chrome with the Claude in Chrome extension. Claude opens a new tab, checks each'));
     console.log(c.gray('  page, writes a report, and you exit Claude (/exit) to come back here.\n'));
     const pick = await select('', [
@@ -752,6 +1115,7 @@ async function smokeScreen(s, report) {
     });
     if (!launched) return;
     report.smoke = readResult(file, startedAt) ?? { result: 'UNKNOWN', summary: 'Claude did not write a report.', file };
+    saveFixBranch(s.dir, report, report.smoke);
   } finally {
     if (server) {
       server.stop();
@@ -816,6 +1180,33 @@ Rules. Follow them strictly:
 `;
 }
 
+function buildUpgradeHelpPrompt(s, report, steps) {
+  const pmName = s.pm === 'yarn' ? 'yarn' : 'npm';
+  const list = steps.map((st) => `- ${st.label}${st.command ? ` (\`${st.command}\`)` : ''}: ${st.findings} advisory(ies). Full output: \`${st.logFile ? path.relative(s.dir, st.logFile) : '(not saved)'}\``).join('\n');
+  const applied = report.steps.filter((st) => st.status === 'applied').map((st) => `- ${st.label}`).join('\n') || '- (none)';
+  return `# Help with a dependency upgrade that failed (started by Gnawky)
+
+Gnawky is fixing security vulnerabilities on the git branch \`${report.branch}\` (started from \`${report.base}\`). These upgrades failed, so their advisories are still open:
+${list}
+
+Already applied on this branch:
+${applied}
+
+Goal: get each package above to at least the version shown (that's the version that fixes the advisories), with a dependency tree that installs cleanly.
+
+1. Read the full output and say in plain words why ${pmName} refused (for example a peer dependency conflict: which package wants which version).
+2. Look at package.json and the lockfile, and give 1 to 3 ways to do the upgrade with trade-offs, for example: upgrade related packages together (e.g. eslint-config-next or @next/* along with next, or react with react-dom), adjust an override/resolution, or (last resort, explain the risk) --legacy-peer-deps. Say which one you recommend and ask me.
+3. After I agree, make the change and run the install, then check that it installed.
+
+Rules. Follow them strictly:
+- Ask before every change to package.json or the lockfile, and before every install command.
+- Always install with \`--ignore-scripts\` (install scripts stay disabled).
+- Never run \`npm audit fix --force\`, \`git commit\`, \`git push\` or \`git checkout\`/\`git reset\`.
+- Don't open .env files, private keys or credentials, and never print secret values.
+- When done, tell me in a few lines what you changed, and that I can exit (/exit) to go back to Gnawky, which checks the upgrade, runs the scripts and the audit again.
+`;
+}
+
 function buildVerifyPrompt(s, report, broken) {
   const logs = broken.map((n) => `- \`${runLabel(s.pm, n)}\`: \`${path.relative(s.dir, report.after[n].logFile)}\``).join('\n');
   const changes = report.steps.filter((st) => st.status === 'applied').map((st) => `- ${st.label}`).join('\n');
@@ -829,7 +1220,7 @@ ${logs}
 Changes made (see \`git diff package.json\`; \`resolutions\` (yarn) and \`overrides\` (npm) entries count as changes too):
 ${changes}
 
-Find out why it fails: read the logs, identify which upgraded package causes it and what changed in it, and find the code in this project that is affected. Then give 1 to 3 ways to fix it with trade-offs (for example: adapt the code, pick a different version, or undo just that upgrade) and say which one you recommend. Then ask me what I want to do.
+Find out why it fails: read the logs, identify which upgraded package causes it and what changed in it, and find the code in this project that is affected. Then give 1 to 3 ways to fix it with trade-offs (for example: adapt the code, pick a different version, or undo just that upgrade) and say which one you recommend. Then ask me what I want to do. When we're done, tell me I can exit (/exit): Gnawky then runs the failing scripts again.
 
 Rules. Follow them strictly:
 - Do not open .env files, private keys (*.pem, *.key), or any credentials file. Never print secret values.
@@ -969,7 +1360,7 @@ async function chooseTriageFilter(s, pool) {
 }
 
 /** Read-only Claude run that gives every finding a verdict and an urgency. */
-async function triageScreen(s) {
+async function triageScreen(s, { fromReview = false } = {}) {
   header(s);
   const blocked = s.cfg.offline
     ? 'Offline mode is on. Triage sends data to Anthropic, so it is turned off (change it in Settings).'
@@ -1046,10 +1437,11 @@ async function triageScreen(s) {
   process.stdout.write('\n');
   s.triage = triage;
   writeReports(s.dir, s.result);
-  await triageResults(s, { ...summary, seconds: Math.round((Date.now() - started) / 1000) });
+  return triageResults(s, { ...summary, seconds: Math.round((Date.now() - started) / 1000) }, { fromReview });
 }
 
-async function triageResults(s, summary) {
+/** fromReview: started from Review & fix, so "review" returns 'review' to it instead of starting a new one. */
+async function triageResults(s, summary, { fromReview = false } = {}) {
   for (;;) {
     header(s);
     const all = triageable(s);
@@ -1080,12 +1472,13 @@ async function triageResults(s, summary) {
     if (now.length) console.log();
 
     const pick = await select('Next step', [
-      { label: "Review & fix in Claude's order (fix now first)", value: 'review' },
+      { label: fromReview ? "Start Review & fix in Claude's order (fix now first)" : "Review & fix in Claude's order (fix now first)", value: 'review' },
       { label: 'Browse findings', value: 'view' },
       { label: 'Open HTML report in browser', value: 'html' },
-      { label: 'Back to menu', value: null },
+      { label: fromReview ? 'Start Review & fix in the usual order (production first)' : 'Back to menu', value: fromReview ? 'plain' : null },
     ]);
-    if (!pick) return;
+    if (!pick) return fromReview ? 'plain' : undefined;
+    if (fromReview && (pick === 'review' || pick === 'plain')) return pick;
     if (pick === 'review') return reviewScreen(s, { claudeOrder: true });
     if (pick === 'view') await viewScreen(s);
     if (pick === 'html' && !openHtmlReport(s)) await pause();
@@ -1350,6 +1743,7 @@ async function settingsScreen(s) {
       { label: `Semgrep skips test and mock files: ${onoff(s.cfg.semgrepSkipTests !== false)}  ${c.gray('(much faster; gitleaks still checks them)')}`, value: 'tests' },
       { label: `Check packages before npm install / yarn add: ${hookFile ? onoff(isHookInstalled(hookFile)) : c.gray('needs zsh or bash')}  ${c.gray(`(all projects${hookFile ? `, ${hookFile.replace(os.homedir(), '~')}` : ''})`)}`, value: 'hook', disabled: !hookFile },
       ...(commitHook ? [{ label: `Pre-commit dependency check: ${commitHook.kind === 'lefthook' ? c.gray('add it to lefthook') : onoff(isCommitHookOn(commitHook))}  ${c.gray(`(${commitHookWhere(commitHook)})`)}`, value: 'commit-hook' }] : []),
+      { label: `Offer a Claude triage before Review & fix: ${onoff(s.cfg.askTriage !== false)}  ${c.gray('(when nothing is triaged yet)')}`, value: 'askTriage' },
       { label: 'Run setup again (detect stack, install tools)', value: 'setup' },
       { label: 'Reset to defaults', value: 'reset' },
       { label: 'Back', value: null },
@@ -1360,6 +1754,8 @@ async function settingsScreen(s) {
       if (v) s.cfg.minSeverity = v;
     } else if (pick === 'offline') {
       s.cfg.offline = !s.cfg.offline;
+    } else if (pick === 'askTriage') {
+      s.cfg.askTriage = s.cfg.askTriage === false;
     } else if (pick === 'tests') {
       s.cfg.semgrepSkipTests = s.cfg.semgrepSkipTests === false;
     } else if (pick === 'rules') {
@@ -1572,10 +1968,10 @@ async function setupScreen(s, { firstRun = false } = {}) {
   console.log(`Let's set Gnawky up for ${c.bold(s.pkg?.name ?? path.basename(s.dir))}. It takes about a minute:\n`);
   console.log(`  1. Look at your project to see which technologies it uses`);
   console.log(c.gray('     (reads package.json and file names only; nothing leaves this computer)'));
-  console.log('  2. Choose whether Gnawky may use the internet');
+  console.log(s.fromWorkspace ? `  2. Use the workspace's network choice (${s.flags.offline ? 'offline' : 'online'})` : '  2. Choose whether Gnawky may use the internet');
   console.log('  3. Recommend the scanners that fit it, and install the ones you want');
   console.log(c.gray('     (plus checks of new packages before npm install / yarn add, and before git commit)'));
-  console.log('  4. Run your first security scan');
+  console.log(fromWorkspaceScan(s) ? '  4. Use the workspace scan, or scan fully (adds secrets and code checks)' : '  4. Run your first security scan');
   console.log(c.gray('\n  Scanning is read-only: nothing in your project changes unless you approve a fix.\n'));
   const start = await select('Ready?', [
     { label: 'Start setup', value: 'start' },
@@ -1594,10 +1990,14 @@ async function setupScreen(s, { firstRun = false } = {}) {
   printProject(p);
   await pause();
 
-  // Step 2: network access
-  const network = await networkStep(s);
-  if (network === null) return; // back: nothing saved, setup runs again next time
-  s.cfg.offline = network === 'offline';
+  // Step 2: network access (opened from a workspace: its choice applies, no need to ask again)
+  if (s.fromWorkspace) {
+    s.cfg.offline = Boolean(s.flags.offline);
+  } else {
+    const network = await networkStep(s);
+    if (network === null) return; // back: nothing saved, setup runs again next time
+    s.cfg.offline = network === 'offline';
+  }
 
   // Step 3: tools
   header(s, { logo: true });
@@ -1679,7 +2079,14 @@ async function setupScreen(s, { firstRun = false } = {}) {
     console.log(c.yellow('\n  Only gitleaks will run. Switch to online in Settings for the dependency audit and code checks.'));
   }
   console.log(c.gray('  You can change these any time in Settings.\n'));
-  const scan = await select('Run your first scan now?', [
+  if (fromWorkspaceScan(s)) {
+    console.log(`The workspace scan already checked this project's dependencies: ${summary(s.result.findings)}.`);
+    console.log(c.gray('A scan here also looks for secrets (gitleaks) and code issues (semgrep).\n'));
+  }
+  const scan = await select(fromWorkspaceScan(s) ? 'Scan the project fully now?' : 'Run your first scan now?', fromWorkspaceScan(s) ? [
+    { label: 'Not now: use the workspace results (dependencies only) and go to the menu', value: false },
+    { label: 'Full scan now (adds secrets and code checks)', value: true },
+  ] : [
     { label: 'Scan now', value: true },
     { label: 'Later, go to the menu', value: false },
   ]);
@@ -1718,7 +2125,27 @@ async function doctorScreen(s) {
   }
 }
 
+/** The fix branch checked out now (saved by Gnawky, or a fix/upgrade-… branch), else null. */
+function fixBranchHere(s) {
+  return fixBranchFor(s.dir);
+}
+
+const smokeLaterLabel = (fb) => `Smoke test the fix on ${fb.branch} in the browser${fb.smoke ? ` (last: ${fb.smoke.result})` : ''}`;
+
+async function smokeLaterScreen(s) {
+  const fb = fixBranchHere(s);
+  if (!fb) return;
+  const report = reportFromFixBranch(fb);
+  await smokeScreen(s, report);
+  if (report.smoke) {
+    header(s);
+    printSmokeResult(s, report.smoke);
+    await pause();
+  }
+}
+
 const SCREENS = {
+  smokeLater: smokeLaterScreen, restoreStash: restoreStashScreen,
   scan: scanScreen, view: viewScreen, review: (s) => reviewScreen(s), reviewClaude: (s) => reviewScreen(s, { claudeOrder: true }),
   claude: (s) => claudeScreen(s, null), triage: triageScreen, audit: auditScreen,
   ignored: ignoredScreen, report: reportScreen, settings: settingsScreen, doctor: doctorScreen,
@@ -1753,8 +2180,9 @@ function findingsMenu(s) {
       title: `Findings (${n} open${ignored ? `, ${ignored} ignored` : ''})`,
       note: s.result ? null : 'No scan yet. Run a scan from the main menu to see findings.',
       options: [
-        { label: `Review & fix${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
-        ...(hasTriage ? [{ label: "Review & fix in Claude's order", value: 'reviewClaude' }] : []),
+        // Once Claude has triaged, its order comes first: fix now, then the rest, likely false positives last.
+        ...(hasTriage ? [{ label: `Review & fix in Claude's order (${n})`, value: 'reviewClaude' }] : []),
+        { label: `Review & fix${hasTriage ? ' in the usual order (production first)' : ''}${n ? ` (${n})` : ''}`, value: 'review', disabled: !n },
         { label: 'Browse findings', value: 'view', disabled: !s.result },
         { label: `Ignored findings${ignored ? ` (${ignored})` : ''}`, value: 'ignored' },
       ],
@@ -1784,8 +2212,36 @@ function aiMenu(s) {
 
 // ------------------------------------------------------------------ main loop
 
-/** fromWorkspace: opened from the workspace app, so leaving returns there instead of quitting. */
-export async function startApp(dir, { offline = false, fromWorkspace = false } = {}) {
+/**
+ * Opened from the workspace: its scan already checked this project's dependencies. Use it when the
+ * project has no scan of its own (or only an older copy of a workspace scan), so it isn't scanned
+ * twice. A project scan of its own (with secrets and code checks) is kept.
+ */
+function adoptWorkspaceScan(s, seed) {
+  if (!seed?.findings) return;
+  if (s.result && (s.result.source !== 'workspace' || s.result.date >= seed.date)) return;
+  const ignored = new Set(safeIgnores(s.dir).map((i) => i.fingerprint));
+  s.result = {
+    target: s.dir,
+    date: seed.date,
+    minSeverity: s.cfg.minSeverity,
+    offline: Boolean(s.cfg.offline),
+    tools: seed.tools ?? [],
+    ignoredCount: (seed.ignoredCount ?? 0) + seed.findings.filter((f) => ignored.has(f.fingerprint)).length,
+    findings: filterFindings(s.dir, s.cfg, seed.findings),
+    source: 'workspace',
+  };
+  writeReports(s.dir, s.result);
+}
+
+const fromWorkspaceScan = (s) => s.result?.source === 'workspace';
+
+/**
+ * fromWorkspace: opened from the workspace app, so leaving returns there instead of quitting.
+ * seed: the workspace scan's results for this project ({ date, findings, tools }).
+ * openFindings: start in the Findings menu (Review & fix) instead of the main menu.
+ */
+export async function startApp(dir, { offline = false, fromWorkspace = false, seed = null, openFindings = false } = {}) {
   // A folder that holds several projects (and isn't one itself) opens the workspace app.
   const { isWorkspaceRoot } = await import('./workspace.js');
   if (!fromWorkspace && isWorkspaceRoot(dir)) {
@@ -1793,10 +2249,11 @@ export async function startApp(dir, { offline = false, fromWorkspace = false } =
     return startWorkspaceApp(dir, { offline });
   }
   const s = {
-    dir, flags: { offline }, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
+    dir, flags: { offline }, fromWorkspace, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
   };
   // A block added by an older Gnawky gets the current shell functions (it's Gnawky's own marked block).
   try { refreshHook(); } catch { /* unreadable or read-only startup file: keep the old block */ }
+  adoptWorkspaceScan(s, seed);
   try {
     if (!s.pkg) {
       header(s);
@@ -1805,16 +2262,21 @@ export async function startApp(dir, { offline = false, fromWorkspace = false } =
       if (!(await confirm('Continue anyway?'))) return;
     }
     if (!configExists(dir)) await setupScreen(s, { firstRun: true });
+    // Opened from the workspace to fix: go straight to the findings (Review & fix first).
+    // Back from there lands on the project menu, and back again returns to the workspace.
+    if (openFindings && s.result?.findings.length) await findingsMenu(s);
     for (;;) {
       const n = s.result?.findings.length ?? 0;
       const ignored = safeIgnores(dir).length;
       const options = [
-        { label: s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
+        { label: fromWorkspaceScan(s) ? 'Full scan (adds secrets and code checks to the workspace results)' : s.result ? 'Scan again' : 'Run security scan', value: 'scan' },
         { label: `Findings${s.result ? ` (${n})` : ''}`, value: 'findings', disabled: !s.result && !ignored },
         { label: 'AI tools', value: 'ai' },
         { label: 'View report', value: 'report', disabled: !s.result },
         { label: 'Settings', value: 'settings' },
         { label: 'Tools & scanners', value: 'doctor' },
+        ...(fixBranchHere(s) ? [{ label: smokeLaterLabel(fixBranchHere(s)), value: 'smokeLater', disabled: s.cfg.offline }] : []),
+        ...(gnawkyStash(dir) ? [{ label: 'Restore your changes stashed before the fix (git stash pop)', value: 'restoreStash' }] : []),
       ];
       const footer = [{ label: fromWorkspace ? '← Back to workspace' : 'Quit', value: 'quit' }];
       // The menu takes its options plus a title, a blank line, the footer, a help line and the cursor line.

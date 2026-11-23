@@ -5,15 +5,26 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { c, clear, pause, select, checklist, printLogo, wordmark, ticker, sevTag, truncate } from './ui.js';
 import { SEVERITY_ORDER, rank } from './finding.js';
-import { IS_WIN } from './scanners.js';
+import { IS_WIN, isAvailable } from './scanners.js';
 import {
   findProjects, loadWorkspace, saveWorkspace, selectedProjects, findLinks, sharedVersions, layers, dependents,
   scanWorkspace, loadWorkspaceResult, mergeAdvisories, throughProjects, sharedPackages, workspaceHtmlFile, workspaceReportFile,
+  attachTriage, triageCounts,
 } from './workspace.js';
+import { loadTriage, runTriage, triageItems, batchCount, triageEstimate, MAX_PARALLEL } from './triage.js';
+import { shipsToProd } from './prod.js';
 import { writeWorkspaceReports } from './workspace-report.js';
 import { prodFirstCount } from './prod.js';
 
 const fmtDate = (iso) => new Date(iso).toLocaleString();
+
+/** "  (12 real, 30 likely false positive)" once something is triaged. */
+function triageNote(s) {
+  if (!s.result) return '';
+  attachTriage(s.root, s.result);
+  const n = triageCounts(s.result.projects);
+  return n.real + n.falsePositive + n.unsure ? c.gray(`  (${n.real} real, ${n.falsePositive} likely false positive, ${n.none} not triaged)`) : '';
+}
 const rule = () => c.gray('─'.repeat(Math.min(process.stdout.columns || 60, 72)));
 
 function summary(items) {
@@ -161,9 +172,133 @@ async function scanScreen(s) {
   s.stale = false;
   console.log();
   printResults(s);
+  const canTriage = !triageBlocked(s) && triageTodo(s, TRIAGE_PRESETS[0]).length;
   const pick = await select('Next step', [
+    ...(canTriage ? [{ label: 'Triage with Claude first (real issue or likely false positive; then the report)', value: 'triage' }] : []),
     { label: 'Open the HTML report in the browser', value: 'open' },
     { label: 'Back to menu', value: null },
+  ]);
+  if (pick === 'triage') return triageScreen(s, { thenReport: true });
+  if (pick === 'open' && !openInBrowser(workspaceHtmlFile(s.root))) await pause();
+}
+
+// ------------------------------------------------------------ Claude triage
+
+const TRIAGE_PRESETS = [
+  { key: 'prod', label: 'Critical and high that ship to production (recommended)', severities: ['critical', 'high'], prodOnly: true },
+  { key: 'crit-high', label: 'Critical and high, production and dev-only', severities: ['critical', 'high'], prodOnly: false },
+  { key: 'all', label: 'Everything at or above the minimum severity', severities: SEVERITY_ORDER, prodOnly: false },
+];
+
+function triageBlocked(s) {
+  if (!s.result) return 'Scan the workspace first.';
+  if (s.ws.offline) return 'Offline mode is on. Triage sends data to Anthropic, so it is turned off.';
+  if (!isAvailable('claude')) return 'Claude Code is not installed. Install it with: npm install -g @anthropic-ai/claude-code';
+  if (IS_WIN) return 'Claude triage is not supported on Windows yet.';
+  return null;
+}
+
+/** Per project: the findings the preset covers that have no verdict yet. [{ p, dir, todo }] */
+function triageTodo(s, preset) {
+  return s.result.projects.map((p) => {
+    const dir = path.join(s.root, p.rel);
+    const entries = loadTriage(dir).entries ?? {};
+    const todo = p.findings.filter((f) => !entries[f.fingerprint] && preset.severities.includes(f.severity) && (!preset.prodOnly || shipsToProd(f)));
+    return { p, dir, todo };
+  }).filter((x) => x.todo.length);
+}
+
+/**
+ * Claude triage across the workspace: one triage per project (Claude reads that project's code),
+ * verdicts saved in each project's .gnawky/triage.json, then the workspace reports are rewritten
+ * with them. thenReport: started right after a scan, so offer the report at the end.
+ */
+async function triageScreen(s, { thenReport = false } = {}) {
+  header(s);
+  const blocked = triageBlocked(s);
+  if (blocked) {
+    console.log(c.yellow(blocked));
+    return pause();
+  }
+  console.log(c.bold('Claude triage across the projects\n'));
+  console.log('  For each finding, Claude reads that project\'s code and says whether it\'s a real issue');
+  console.log('  there and how urgent it is. Likely false positives then go last, in the report and in');
+  console.log('  each project\'s Review & fix. Findings that already have a verdict are skipped.\n');
+  const options = TRIAGE_PRESETS.map((pr) => {
+    const todo = triageTodo(s, pr);
+    const n = todo.reduce((k, x) => k + x.todo.length, 0);
+    return { label: `${pr.label}  ${c.gray(n ? `${n} finding(s) in ${todo.length} project(s)` : 'nothing left to triage')}`, value: pr.key, disabled: !n };
+  });
+  const key = await select('What should Claude triage?', [...options, { label: 'Back', value: null }]);
+  if (!key) return;
+  const preset = TRIAGE_PRESETS.find((pr) => pr.key === key);
+  const work = triageTodo(s, preset).map((x) => ({ ...x, items: triageItems(x.todo) }));
+  const batches = work.reduce((k, x) => k + batchCount(x.items), 0);
+  const maxBatches = Math.max(...work.map((x) => batchCount(x.items)));
+
+  header(s);
+  const width = Math.max(...work.map((x) => x.p.rel.length));
+  for (const x of work) console.log(`  ${x.p.rel.padEnd(width)}  ${x.todo.length} finding(s) in ${x.items.length} item(s), ${batchCount(x.items)} Claude run(s)`);
+  console.log();
+  const choices = [1, 2, 3].filter((n) => n <= MAX_PARALLEL);
+  const parallel = maxBatches < 2 ? 1 : await select('How many Claude runs at the same time (within a project)?', [
+    ...choices.map((n) => ({ label: `${n} at a time${n === 1 ? '' : c.gray('  same tokens, heavier on rate limits')}`, value: n, disabled: n > maxBatches })),
+    { label: 'Back', value: null },
+  ]);
+  if (!parallel) return;
+  const rounds = work.reduce((k, x) => k + Math.ceil(batchCount(x.items) / parallel), 0);
+
+  header(s);
+  console.log(c.bold('Before you continue: privacy and cost\n'));
+  console.log(`  • ${work.reduce((k, x) => k + x.todo.length, 0)} finding(s) in ${work.length} project(s), ${batches} Claude run(s), one project after the other.`);
+  console.log('  • In each project, Claude gets the scan results and reads the source files, package.json,');
+  console.log('    the lockfile and node_modules it needs. All of it is sent to Anthropic.');
+  console.log('  • Claude can only read and search files: it cannot edit files or run commands.');
+  console.log('    Reading .env files, keys and .npmrc is blocked.');
+  console.log(`  • Verdicts are saved in each project's ${c.bold('.gnawky/triage.json')} (Gnawky's own folder there), so`);
+  console.log('    opening the project in Gnawky uses them too.');
+  console.log(c.gray(`  • Rough estimate: ${triageEstimate(rounds, 1)}. It uses your Claude plan or API credits.\n`));
+  const go = await select('Start triage?', [{ label: 'Start', value: true }, { label: 'Cancel', value: null }]);
+  if (!go) return;
+
+  console.log();
+  const started = Date.now();
+  const totals = { triaged: 0, missing: 0, cost: 0, errors: [] };
+  for (const x of work) {
+    let state = { done: 0, running: 0, total: batchCount(x.items) };
+    const line = () => `  ${x.p.rel}: ${state.done} of ${state.total} run(s) done${state.running ? `, ${state.running} running` : ''}…`;
+    const draw = () => process.stdout.write(`\r\x1b[2K${line()}`);
+    const tick = setInterval(draw, 1000);
+    draw();
+    try {
+      const { summary: sum } = await runTriage(x.dir, x.todo, x.p.findings, { parallel, onProgress: (st) => { state = st; draw(); } });
+      totals.triaged += sum.triaged;
+      totals.missing += sum.missing;
+      totals.cost += sum.cost;
+      totals.errors.push(...sum.errors.map((e) => `${x.p.rel}: ${e}`));
+    } catch (e) {
+      totals.errors.push(`${x.p.rel}: ${e.message}`);
+    } finally {
+      clearInterval(tick);
+    }
+    process.stdout.write(`\r\x1b[2K  ${c.green('✔')} ${x.p.rel}\n`);
+  }
+  writeWorkspaceReports(s.root, s.result);
+
+  header(s);
+  const n = triageCounts(s.result.projects);
+  console.log(c.bold('Claude triage done') + c.gray(`  ${Math.round((Date.now() - started) / 1000)}s${totals.cost ? `  ·  ≈ $${totals.cost.toFixed(2)} at API prices` : ''}\n`));
+  console.log(`  ${c.red(`${n.real} real`)}  ·  ${c.green(`${n.falsePositive} likely false positive`)}  ·  ${n.unsure} unsure  ·  ${c.gray(`${n.none} not triaged`)}\n`);
+  for (const p of s.result.projects) {
+    const k = triageCounts([p]);
+    if (k.real + k.falsePositive + k.unsure) console.log(`  ${p.rel.padEnd(Math.max(...s.result.projects.map((q) => q.rel.length)))}  ${k.real} real · ${k.falsePositive} likely false positive · ${k.unsure} unsure`);
+  }
+  if (totals.missing) console.log(c.yellow(`\n  ${totals.missing} finding(s) got no verdict; run the triage again to retry them.`));
+  for (const e of totals.errors.slice(0, 5)) console.log(c.red(`  ✖ ${e}`));
+  console.log(c.gray('\n  The reports now show the verdicts. They are suggestions: nothing is fixed or ignored.\n'));
+  const pick = await select('Next step', [
+    { label: 'Open the HTML report in the browser', value: 'open' },
+    { label: thenReport ? 'Back to menu' : 'Back', value: null },
   ]);
   if (pick === 'open' && !openInBrowser(workspaceHtmlFile(s.root))) await pause();
 }
@@ -243,7 +378,10 @@ function markDone(s, rel, done) {
 
 async function openProject(s, rel) {
   const { startApp } = await import('./app.js');
-  await startApp(path.join(s.root, rel), { offline: s.ws.offline, fromWorkspace: true });
+  // The workspace scan already checked this project's dependencies: hand them over.
+  const r = (s.result?.projects ?? []).find((p) => p.rel === rel);
+  const seed = r ? { date: s.result.date, findings: r.findings, tools: r.tools, ignoredCount: r.ignoredCount } : null;
+  await startApp(path.join(s.root, rel), { offline: s.ws.offline, fromWorkspace: true, seed, openFindings: true });
   // Fixes change the project's lockfile, so the workspace results may be out of date.
   s.stale = true;
 }
@@ -393,6 +531,7 @@ export async function startWorkspaceApp(root, { offline = false } = {}) {
         { label: 'How they are linked', value: 'links' },
         { label: 'Advisories across projects', value: 'shared', disabled: !s.result },
         { label: 'View report', value: 'report', disabled: !s.result },
+        { label: `Claude triage${triageNote(s)}`, value: 'triage', disabled: !s.result },
         { label: `Fix in recommended order${fixedNote(s)}`, value: 'guided', disabled: !picked },
         { label: 'Open a project (to fix, ignore, triage…)', value: 'open', disabled: !picked },
         { label: `Pick projects (${picked} of ${s.all.length})`, value: 'pick' },
@@ -405,6 +544,7 @@ export async function startWorkspaceApp(root, { offline = false } = {}) {
       else if (choice === 'links') await linksScreen(s);
       else if (choice === 'shared') await sharedScreen(s);
       else if (choice === 'report') await reportScreen(s);
+      else if (choice === 'triage') await triageScreen(s);
       else if (choice === 'open') await openProjectScreen(s);
       else if (choice === 'guided') await guidedFixScreen(s);
       else if (choice === 'pick') await pickScreen(s);

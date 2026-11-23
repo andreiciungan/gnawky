@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { SEVERITY_ORDER } from './finding.js';
-import { VERDICTS, URGENCIES } from './triage.js';
+import { VERDICTS, URGENCIES, reviewGroups } from './triage.js';
 import { scopeText, groupScopeText, shipsToProd, isProdFirst, prodFirstCount, priorityTier } from './prod.js';
 import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
@@ -47,7 +47,7 @@ function fixBadge(type) {
   return `<span class="fix fix-${kind}">${esc(label)}</span>`;
 }
 
-function triageBadges(t) {
+export function triageBadges(t) {
   const v = VERDICTS[t.verdict] ? t.verdict : 'needs-review';
   const u = URGENCIES[t.urgency] ? t.urgency : 'low';
   return `<span class="tri tri-${v}">${esc(VERDICTS[v])}</span>${v === 'false-positive' ? '' : `<span class="tri urg-${u}">${esc(URGENCIES[u])}</span>`}`;
@@ -217,7 +217,7 @@ export function renderHtml({ target, date, findings, tools, ignoredCount, minSev
   const dateText = isNaN(when) ? String(date) : when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
   const counts = SEVERITY_ORDER.map((s) => [s, findings.filter((f) => f.severity === s).length]);
   const toolNames = [...new Set(findings.map((f) => f.tool))];
-  const groups = groupFindings(findings);
+  const groups = reviewGroups(findings, triage);
   const noneRan = tools.every((t) => t.status !== 'ran');
   const tri = findings.map((f) => triage.entries[f.fingerprint]).filter(Boolean);
   const fixNow = tri.filter((t) => t.verdict !== 'false-positive' && t.urgency === 'now').length;
@@ -252,7 +252,7 @@ ${BRAND}
 ${noneRan ? '<div class="warn"><b>Warning:</b> no scanner ran successfully, so an empty result does not mean the project is safe.</div>' : ''}
 <div class="tiles">${tiles}</div>
 ${prodFirst || devOnly ? `<div class="claude"><button class="tile prod-tile" id="prodfirst" aria-pressed="false"><span class="n">${prodFirst}</span><span class="l">Fix for production first</span></button>
-<p>Critical and high findings that ship to production, listed first. ${devOnly ? `${devOnly} finding(s) come only from devDependencies (build, test and lint tools) and are listed last.` : ''} Worked out from package.json${findings.some((f) => /Next\.js/.test(f.scopeNote ?? '')) ? '; in Next.js, devDependencies that aren\'t test or lint tools count as production, since they can be bundled' : ''}.</p></div>` : ''}
+<p>Critical and high findings that ship to production${tri.length ? '. The list follows Claude\'s order (fix now first, likely false positives last); the Sort menu switches to production first' : ', listed first'}. ${devOnly ? `${devOnly} finding(s) come only from devDependencies (build, test and lint tools) and are listed last.` : ''} Worked out from package.json${findings.some((f) => /Next\.js/.test(f.scopeNote ?? '')) ? '; in Next.js, devDependencies that aren\'t test or lint tools count as production, since they can be bundled' : ''}.</p></div>` : ''}
 ${tri.length ? `<div class="claude"><button class="tile now-tile" id="fixnow" aria-pressed="false"><span class="n">${fixNow}</span><span class="l">Fix now, says Claude</span></button>
 <p>Claude reviewed ${tri.length} of ${findings.length} findings against the code: ${fixNow} to fix now, ${falsePos} likely false positive(s). These are suggestions, not facts. Check the reason on each finding before you rely on it.</p></div>` : ''}
 
@@ -263,9 +263,9 @@ ${tri.length ? `<div class="claude"><button class="tile now-tile" id="fixnow" ar
 ${groups.length < findings.length ? `<p class="muted">${findings.length} findings in ${groups.length} items: advisories whose fix changes the same package are grouped, and each item says how many its upgrade really fixes.</p>` : ''}
 ${findings.length ? `<div class="controls">
 <input id="q" type="search" placeholder="Search title, package, file, rule, CWE…" aria-label="Search findings">
-${devOnly ? '<select id="scope" aria-label="Filter by production"><option value="">Production and dev</option><option value="prod">Ships to production</option><option value="dev">Dev only</option></select>\n' : ''}<select id="tool" aria-label="Filter by tool"><option value="">All tools</option>${toolNames.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
+${findings.some((f) => f.scope) ? `<select id="scope" aria-label="Filter by production"><option value="">All (${findings.length})</option><option value="prod"${findings.length - devOnly ? '' : ' disabled'}>Production only (${findings.length - devOnly})</option><option value="dev"${devOnly ? '' : ' disabled'}>Dev only (${devOnly})</option></select>\n` : ''}<select id="tool" aria-label="Filter by tool"><option value="">All tools</option>${toolNames.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
 ${tri.length ? `<select id="verdict" aria-label="Filter by Claude's verdict"><option value="">Any verdict</option>${Object.entries(VERDICTS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}<option value="none">not triaged</option></select>
-<select id="order" aria-label="Sort"><option value="sev">Sort: severity</option><option value="claude">Sort: Claude's urgency</option></select>` : ''}
+<select id="order" aria-label="Sort"><option value="claude">Sort: Claude's order</option><option value="sev">Sort: production first, then severity</option></select>` : ''}
 <select id="toggle" aria-label="Expand or collapse"><option value="">Expand…</option><option value="open">Expand all</option><option value="close">Collapse all</option></select>
 </div>
 <div id="list">${groups.map((g, i) => (isGroup(g) ? groupCard(g, i, triage) : findingCard(g.lead, i, triage))).join('\n')}</div>
@@ -297,10 +297,10 @@ ${tri.length ? `<select id="verdict" aria-label="Filter by Claude's verdict"><op
   if(now)now.addEventListener('click',function(){onlyNow=!onlyNow;now.setAttribute('aria-pressed',onlyNow);apply();});
   if(pf)pf.addEventListener('click',function(){onlyPf=!onlyPf;pf.setAttribute('aria-pressed',onlyPf);apply();});
   if(scope)scope.addEventListener('change',apply);
-  var rankU={now:0,soon:1,low:2,none:4},rankS={critical:0,high:1,medium:2,low:3,info:4};
-  function key(c){return c.dataset.verdict==='false-positive'?3:rankU[c.dataset.urgency];}
+  var rankS={critical:0,high:1,medium:2,low:3,info:4};
+  // The page comes in Claude's order (fix now, soon, low, not triaged, likely false positives last).
   if(order)order.addEventListener('change',function(){
-    cards.slice().sort(function(a,b){return order.value==='claude'?(key(a)-key(b))||(rankS[a.dataset.sev]-rankS[b.dataset.sev]):(+a.dataset.i)-(+b.dataset.i);})
+    cards.slice().sort(function(a,b){return order.value==='claude'?(+a.dataset.i)-(+b.dataset.i):(+a.dataset.tier)-(+b.dataset.tier)||(rankS[a.dataset.sev]-rankS[b.dataset.sev])||(+a.dataset.i)-(+b.dataset.i);})
       .forEach(function(c){list.appendChild(c);});
   });
   cards.forEach(function(c,i){c.dataset.i=i;});

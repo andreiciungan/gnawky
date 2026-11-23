@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { OUT_DIR, ensureOutDir } from './config.js';
 import { SEVERITY_ORDER, loadIgnores, rank } from './finding.js';
-import { packageManager, auditName } from './pm.js';
+import { packageManager, detectPackageManager, auditName } from './pm.js';
 import { scanDependencies } from './scanners.js';
 import { usesNext, scanNextBundledReact } from './nextjs.js';
 import { visibleFindings } from './scan.js';
@@ -17,6 +17,7 @@ import { satisfies, valid, parseRange } from './semver.js';
 import { advisoryTitle } from './groups.js';
 import { parseLockfile } from './yarn.js';
 import { classifyScope, shipsToProd, isProdFirst } from './prod.js';
+import { loadTriage } from './triage.js';
 
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
 const SKIP_DIRS = new Set(['node_modules', OUT_DIR]);
@@ -100,10 +101,10 @@ export function installedVersion(p, name, spec) {
 
 /** Things worth knowing before trusting a project's scan (e.g. two lockfiles). */
 export function projectNotes(p) {
-  const has = (f) => fs.existsSync(path.join(p.dir, f));
   const notes = [];
-  if (has('package-lock.json') && has('yarn.lock')) {
-    notes.push('has both package-lock.json and yarn.lock; npm audit checked package-lock.json, so if the project installs with yarn, delete the stale one');
+  const d = detectPackageManager(p.dir);
+  if (d.others.length) {
+    notes.push(`has several lockfiles; Gnawky uses ${d.pm === 'npm' ? 'npm' : d.pm} because ${d.why}. If ${d.others.join(', ')} ${d.others.length === 1 ? 'is' : 'are'} stale, delete ${d.others.length === 1 ? 'it' : 'them'}`);
   }
   if (!p.pm) notes.push('no lockfile, so its dependencies could not be checked');
   return notes;
@@ -368,4 +369,34 @@ export function countBySeverity(items) {
     .filter(([, n]) => n)
     .map(([s, n]) => `${n} ${s}`)
     .join(', ');
+}
+
+// ------------------------------------------------------------ Claude triage
+
+/**
+ * Puts each project's Claude verdicts (from its own .gnawky/triage.json) on the result:
+ * p.triage = { fingerprint: { verdict, urgency, reason } } for the project's current findings.
+ * The verdicts stay in the projects, so opening one in Gnawky uses them too.
+ */
+export function attachTriage(root, result) {
+  for (const p of result?.projects ?? []) {
+    const entries = loadTriage(path.join(root, p.rel)).entries ?? {};
+    p.triage = Object.fromEntries(p.findings.filter((f) => entries[f.fingerprint]).map((f) => [f.fingerprint, entries[f.fingerprint]]));
+  }
+  return result;
+}
+
+/** { real, falsePositive, unsure, none } over the projects' findings. */
+export function triageCounts(projects) {
+  const n = { real: 0, falsePositive: 0, unsure: 0, none: 0 };
+  for (const p of projects) {
+    for (const f of p.findings) {
+      const v = p.triage?.[f.fingerprint]?.verdict;
+      if (v === 'real') n.real++;
+      else if (v === 'false-positive') n.falsePositive++;
+      else if (v === 'needs-review') n.unsure++;
+      else n.none++;
+    }
+  }
+  return n;
 }
