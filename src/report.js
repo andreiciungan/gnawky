@@ -1,4 +1,5 @@
 import { SEVERITY_ORDER } from './finding.js';
+import { scopeText, groupScopeText, isProdFirst, prodFirstCount, shipsToProd } from './prod.js';
 import { VERDICTS, URGENCIES } from './triage.js';
 import { groupFindings, isGroup, groupFixes, groupTitle, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
@@ -16,6 +17,11 @@ export function renderMarkdown({ target, date, findings, tools, ignoredCount }, 
   }
   if (!findings.length) out.push('| none | 0 |');
   out.push('');
+  const first = prodFirstCount(findings);
+  const dev = findings.filter((f) => !shipsToProd(f)).length;
+  if (first || dev) {
+    out.push(`**Fix for production first:** ${first} critical/high finding(s) that ship to production, listed first.${dev ? ` ${dev} come only from devDependencies and are listed last.` : ''}`, '');
+  }
 
   out.push('## Scanners', '');
   for (const t of tools) {
@@ -43,6 +49,7 @@ function pushFinding(out, f, triage) {
   out.push(`### [${f.severity.toUpperCase()}] ${f.title}`, '');
   out.push(`- **Tool / rule:** ${f.tool} / \`${f.ruleId}\``);
   out.push(`- **Location:** ${loc}`);
+  if (scopeText(f)) out.push(`- **Production:** ${scopeText(f)}${isProdFirst(f) ? ' (fix first)' : ''}`);
   if (f.cwe?.length) out.push(`- **CWE:** ${f.cwe.join(', ')}`);
   if (f.description) out.push(`- **Details:** ${f.description}`);
   out.push(`- **Suggested fix (${f.fix.type}):** ${f.fix.detail}`);
@@ -60,6 +67,7 @@ function pushFinding(out, f, triage) {
 function pushGroup(out, g, triage) {
   out.push(`### [${g.severity.toUpperCase()}] ${groupTitle(g)} (${severityCounts(g.findings)})`, '');
   out.push(`- **Package:** \`${g.package}\``);
+  if (groupScopeText(g.findings)) out.push(`- **Production:** ${groupScopeText(g.findings)}${g.findings.some(isProdFirst) ? ' (fix first)' : ''}`);
   if (alsoFixes(g)) out.push(`- **Also covers:** ${alsoFixes(g)}, installed by \`${g.package}\`; npm expects this upgrade to fix them (not checked)`);
   out.push(`- **Location:** ${[...new Set(g.findings.map((f) => `\`${f.file}\``))].join(', ')}`);
   const fixes = groupFixes(g);

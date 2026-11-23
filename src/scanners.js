@@ -156,7 +156,9 @@ export async function scanNpmAudit(dir, { fixes = true } = {}) {
   const overrides = fixes && wanted.size ? await npmOverrideFixes(dir, wanted) : new Map();
 
   const findings = [];
+  const parents = lockParents(dir);
   for (const [pkg, v] of vulns) {
+    const via = directRoots(pkg, data.vulnerabilities, direct, parents);
     for (const adv of advisoriesOf(v)) {
       findings.push(
         makeFinding({
@@ -173,11 +175,51 @@ export async function scanNpmAudit(dir, { fixes = true } = {}) {
           // npm audit doesn't report CVE IDs; the fix log looks them up when it needs them.
           ghsa: ghsaFromUrl(adv.url),
           fix: overrides.get(pkg) ?? npmFix(v.fixAvailable, direct),
+          via,
         }),
       );
     }
   }
   return { findings };
+}
+
+/**
+ * Who depends on whom in package-lock.json (v2/v3 "packages"), by package name:
+ * name → names of the packages that depend on it. '' is the project itself.
+ */
+function lockParents(dir) {
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8')); } catch { return null; }
+  if (!lock.packages) return null;
+  const parents = new Map();
+  for (const [key, entry] of Object.entries(lock.packages)) {
+    const name = key === '' ? '' : (entry.name ?? key.slice(key.lastIndexOf('node_modules/') + 13));
+    const deps = { ...entry.dependencies, ...entry.optionalDependencies, ...entry.peerDependencies, ...(key === '' ? entry.devDependencies : {}) };
+    for (const d of Object.keys(deps)) {
+      if (!parents.has(d)) parents.set(d, new Set());
+      parents.get(d).add(name);
+    }
+  }
+  return parents;
+}
+
+/**
+ * The project's direct dependencies that bring in a vulnerable package: walks up the lockfile's
+ * dependency tree (or npm audit's `effects` without one) to entries listed in package.json.
+ */
+function directRoots(pkg, vulns, direct, parents) {
+  const roots = new Set();
+  const seen = new Set([pkg]);
+  const queue = [pkg];
+  while (queue.length && seen.size < 5000) {
+    const name = queue.shift();
+    if (direct[name]) roots.add(name);
+    const up = parents ? [...(parents.get(name) ?? [])] : vulns[name]?.effects ?? [];
+    for (const e of up) {
+      if (e && !seen.has(e)) { seen.add(e); queue.push(e); }
+    }
+  }
+  return [...roots].sort();
 }
 
 /**

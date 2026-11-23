@@ -39,6 +39,9 @@ import {
   packageManager, lockfileName, runLabel, auditName, isDepAudit, DEP_AUDIT_TOOLS,
 } from './pm.js';
 import {
+  scopeText, groupScopeText, shipsToProd, isProdFirst, prodFirstCount, priorityTier,
+} from './prod.js';
+import {
   detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
 } from './verify.js';
 
@@ -79,6 +82,8 @@ function header(s, { logo = false, below } = {}) {
     console.log(`${wordmark()}  ${c.bold(name)}  ${c.gray(s.dir)}`);
   }
   const bits = [s.result ? `Last scan ${fmtDate(s.result.date)}: ${summary(s.result.findings)}` : c.gray('Not scanned yet')];
+  const first = s.result ? prodFirstCount(s.result.findings) : 0;
+  if (first) bits.push(c.bold(c.red(`${first} to fix for production first`)));
   if (s.cfg.offline) bits.push(c.yellow('offline mode'));
   if (s.stale && s.result) bits.push(c.yellow('results may be out of date, rescan'));
   if (!s.pkg) bits.push(c.yellow('no package.json here'));
@@ -98,6 +103,7 @@ function printFinding(f, t) {
   console.log(`${sevTag(f.severity)} ${c.bold(f.title)}\n`);
   const row = (k, v) => v && console.log(`  ${c.gray(k.padEnd(14))}${v}`);
   row('Location', loc(f));
+  row('Production', scopeLine(f.scope ? [f] : []));
   row('Found by', `${f.tool} (${f.ruleId})`);
   row('CWE', f.cwe?.join(', '));
   row('Details', f.description);
@@ -115,6 +121,17 @@ function printFinding(f, t) {
   console.log();
 }
 
+/** "ships to production (via axios)", in red when it's critical/high, gray when dev only. */
+function scopeLine(findings) {
+  const text = groupScopeText(findings);
+  if (!text) return null;
+  if (findings.some(isProdFirst)) return `${c.red(text)}  ${c.bold(c.red('fix first'))}`;
+  return findings.some(shipsToProd) ? text : c.gray(text);
+}
+
+/** A tag for lists: nothing for production findings, [dev only] for the rest. */
+const devTag = (findings) => (findings.some((f) => f.scope) && !findings.some(shipsToProd) ? c.gray('[dev only]') : '');
+
 /** A group of advisories for one package: the shared fix once, then one line per advisory. */
 function printGroup(g, triage, { max = 12 } = {}) {
   if (!isGroup(g)) return printFinding(g.lead, triage.entries[g.lead.fingerprint]);
@@ -122,6 +139,7 @@ function printGroup(g, triage, { max = 12 } = {}) {
   console.log(`${sevTag(g.severity)} ${c.bold(groupTitle(g))}  ${c.gray(`(${severityCounts(g.findings)})`)}\n`);
   const row = (k, v) => v && console.log(`  ${c.gray(k.padEnd(14))}${v}`);
   row('Package', g.package);
+  row('Production', scopeLine(g.findings));
   row('Also covers', alsoFixes(g) && `${alsoFixes(g)}: installed by ${g.package}; npm expects this upgrade to fix them (not checked)`);
   const fixes = groupFixes(g);
   if (fixes.length === 1) {
@@ -221,8 +239,8 @@ async function viewScreen(s) {
 
     const options = items.map((g, i) => ({
       label: isGroup(g)
-        ? `${sevTag(g.severity)} ${groupTitle(g)}  ${c.gray(`(${severityCounts(g.findings)})`)}  ${triageTag(groupTriage(g, s.triage))}`.replace(/  +/g, '  ')
-        : `${sevTag(g.severity)} ${g.lead.title}  ${triageTag(s.triage.entries[g.lead.fingerprint])} ${c.gray(loc(g.lead))}`.replace(/  +/g, '  '),
+        ? `${sevTag(g.severity)} ${groupTitle(g)}  ${c.gray(`(${severityCounts(g.findings)})`)}  ${devTag(g.findings)} ${triageTag(groupTriage(g, s.triage))}`.replace(/  +/g, '  ')
+        : `${sevTag(g.severity)} ${g.lead.title}  ${devTag([g.lead])} ${triageTag(s.triage.entries[g.lead.fingerprint])} ${c.gray(loc(g.lead))}`.replace(/  +/g, '  '),
       value: g,
       number: page * size + i + 1,
     }));
@@ -336,7 +354,9 @@ async function reviewScreen(s, { claudeOrder = false } = {}) {
   for (const [i, g] of list.entries()) {
     header(s);
     const what = list.length === s.result.findings.length ? 'Finding' : 'Item';
-    console.log(c.gray(`${what} ${i + 1} of ${list.length}   ·   planned so far: ${describePlan(plan).length} change(s)\n`));
+    const tier = Math.min(...g.findings.map(priorityTier));
+    const stage = ['fix for production first', 'ships to production', 'dev only'][tier];
+    console.log(c.gray(`${what} ${i + 1} of ${list.length}   ·   ${stage}   ·   planned so far: ${describePlan(plan).length} change(s)\n`));
     printGroup(g, s.triage);
     const auto = g.findings.filter(isAutoFixable);
     const all = isGroup(g) ? ` all ${g.findings.length}` : '';
@@ -759,25 +779,39 @@ const SEVERITIES_DESC = ['critical', 'high', 'medium', 'low', 'info'];
 
 /** Rough wall-clock estimate: 1-4 minutes per Claude run, `parallel` runs at once. */
 
-/** Severity and source checkboxes. Resolves with { severities, sources }, or null. */
+const SCOPE_ROWS = ['production', 'dev-only'];
+const scopeKey = (f) => (shipsToProd(f) ? 'production' : 'dev-only');
+
+/**
+ * Severity, source and production checkboxes. Resolves with { severities, sources, scopes }, or
+ * null. By default: critical and high findings that ship to production.
+ */
 async function chooseTriageFilter(s, pool) {
   const last = s.cfg.triageFilter ?? {};
   const severities = SEVERITIES_DESC.filter((v) => pool.some((f) => f.severity === v));
   const sources = Object.keys(TRIAGE_SOURCES).filter((v) => pool.some((f) => findingSource(f) === v));
+  const scopes = SCOPE_ROWS.filter((v) => pool.some((f) => scopeKey(f) === v));
   const keep = (saved, avail, def) => {
     const picked = Array.isArray(saved) ? saved.filter((v) => avail.includes(v)) : def.filter((v) => avail.includes(v));
     return new Set(picked.length ? picked : avail);
   };
   const sev = keep(last.severities, severities, ['critical', 'high']);
   const src = keep(last.sources, sources, sources);
+  const scp = keep(last.scopes, scopes, ['production']);
+  const keyOf = { sev: (f) => f.severity, src: findingSource, scp: scopeKey };
   const rows = [
     { heading: 'Severity' },
-    ...severities.map((v) => ({ set: sev, value: v })),
+    ...severities.map((v) => ({ set: sev, key: 'sev', value: v })),
     { heading: '' },
     { heading: 'Source' },
-    ...sources.map((v) => ({ set: src, value: v })),
+    ...sources.map((v) => ({ set: src, key: 'src', value: v })),
+    ...(scopes.length > 1 ? [
+      { heading: '' },
+      { heading: 'Production (dev-only = only devDependencies bring it in)' },
+      ...scopes.map((v) => ({ set: scp, key: 'scp', value: v })),
+    ] : []),
   ];
-  const picked = () => pool.filter((f) => sev.has(f.severity) && src.has(findingSource(f)));
+  const picked = () => pool.filter((f) => sev.has(f.severity) && src.has(findingSource(f)) && scp.has(scopeKey(f)));
   const view = {
     title: () => {
       const todo = picked();
@@ -790,7 +824,7 @@ async function chooseTriageFilter(s, pool) {
     },
     items: () => rows.map((r) => {
       if ('heading' in r) return r;
-      const inPool = pool.filter((f) => (r.set === sev ? f.severity : findingSource(f)) === r.value);
+      const inPool = pool.filter((f) => keyOf[r.key](f) === r.value);
       let extra = '';
       if (r.value === 'dependencies') extra = c.gray(` → ${triageItems(inPool).length} package(s)`);
       if (r.value === 'secrets') extra = c.gray(` → ${triageItems(inPool).length} file(s)`);
@@ -804,8 +838,8 @@ async function chooseTriageFilter(s, pool) {
   for (;;) {
     header(s);
     if ((await checklist(view)) === null) return null;
-    if (picked().length) return { severities: [...sev], sources: [...src] };
-    console.log(c.yellow('\nNothing to triage with this selection. Tick at least one severity and one source.'));
+    if (picked().length) return { severities: [...sev], sources: [...src], scopes: [...scp] };
+    console.log(c.yellow('\nNothing to triage with this selection. Tick at least one option in each section.'));
     await pause();
   }
 }
@@ -843,7 +877,7 @@ async function triageScreen(s) {
   const pool = scope === 'new' ? fresh : all;
   const filter = await chooseTriageFilter(s, pool);
   if (!filter) return;
-  const todo = pool.filter((f) => filter.severities.includes(f.severity) && filter.sources.includes(findingSource(f)));
+  const todo = pool.filter((f) => filter.severities.includes(f.severity) && filter.sources.includes(findingSource(f)) && filter.scopes.includes(scopeKey(f)));
   const items = triageItems(todo);
   const batches = batchCount(items);
 
@@ -1626,7 +1660,14 @@ function aiMenu(s) {
 
 // ------------------------------------------------------------------ main loop
 
-export async function startApp(dir, { offline = false } = {}) {
+/** fromWorkspace: opened from the workspace app, so leaving returns there instead of quitting. */
+export async function startApp(dir, { offline = false, fromWorkspace = false } = {}) {
+  // A folder that holds several projects (and isn't one itself) opens the workspace app.
+  const { isWorkspaceRoot } = await import('./workspace.js');
+  if (!fromWorkspace && isWorkspaceRoot(dir)) {
+    const { startWorkspaceApp } = await import('./workspace-app.js');
+    return startWorkspaceApp(dir, { offline });
+  }
   const s = {
     dir, flags: { offline }, cfg: loadConfig(dir), result: loadLastScan(dir), triage: loadTriage(dir), pkg: readPkg(dir), pm: packageManager(dir), stale: false,
   };
@@ -1651,7 +1692,7 @@ export async function startApp(dir, { offline = false } = {}) {
         { label: 'Settings', value: 'settings' },
         { label: 'Tools & scanners', value: 'doctor' },
       ];
-      const footer = [{ label: 'Quit', value: 'quit' }];
+      const footer = [{ label: fromWorkspace ? '← Back to workspace' : 'Quit', value: 'quit' }];
       // The menu takes its options plus a title, a blank line, the footer, a help line and the cursor line.
       header(s, { logo: true, below: options.length + 5 });
       const choice = await select('What would you like to do?', options, { footer });
@@ -1661,6 +1702,7 @@ export async function startApp(dir, { offline = false } = {}) {
   } catch (e) {
     if (e.code !== 'ABORT_ERR') throw e;
   }
+  if (fromWorkspace) return;
   clear();
   console.log('Gnawky closed. Reports are in .gnawky/');
 }

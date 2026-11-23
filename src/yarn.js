@@ -239,6 +239,8 @@ export async function scanYarnAudit(dir) {
         fix: unpatched
           ? { type: 'manual', detail: 'No patched version published. Consider replacing the package, removing it, or mitigating how you use it.' }
           : fix,
+        // The direct dependencies that bring it in (the first package of each path).
+        via: [...new Set([...a.versions.values()].flat().map((p) => p.split('>')[0]))].sort(),
       }));
     }
   }

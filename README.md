@@ -129,6 +129,34 @@ Every scan writes three files to `.gnawky/`: `findings.json`, `security-report.m
 
 Requires Node 18+ and a `package-lock.json` or a Yarn 1 (Classic) `yarn.lock`.
 
+### What to fix first: production
+
+Every dependency finding says whether it **ships to production**. Gnawky works this out from `package.json`, without Claude. A package that one of your `dependencies` brings in counts as production. One that only `devDependencies` bring in counts as dev-only. Test and lint tools (jest, vitest, eslint, @types/…) count as dev-only even when they're listed under `dependencies`, and the finding tells you to move them. In Next.js projects, devDependencies that aren't test or lint tools count as production, because the app can bundle them. Code and secret findings are always production. A finding whose dependency path can't be found counts as production, to be safe.
+
+Critical and high findings that ship to production come first everywhere: the header ("53 to fix for production first"), Browse and Review & fix, both reports (with a **Fix for production first** tile and a production filter in the HTML), the workspace view, and `gnawky findings` (`--prod-only` hides dev-only findings). Claude triage then checks whether the vulnerable code is actually used. Its filter starts with production critical/high only (`gnawky triage --scope production`), so it reads far fewer findings.
+
+### Several projects at once (workspaces)
+
+Start Gnawky in a folder that holds several projects (and has no `package.json` of its own), for example `~/code/acme` with an API, a shared library and two apps:
+
+```bash
+cd ~/code/acme
+gnawky
+```
+
+1. **Pick the projects** that belong together. The list shows which ones use each other.
+2. **See how they're linked.** Gnawky reads each `package.json` and lockfile. It shows who uses whom, at which installed version, and when projects use different releases of a shared one (a fix there only reaches the projects that move to it). It also gives a fix order: shared projects first, then the ones that use them.
+3. **Check every project's dependencies** (npm/yarn audit, plus the React bundled in Next.js) in one go. The results show advisories found in more than one project, and the advisories each shared project brings into the projects that use it.
+
+Results go to `.gnawky/` in the workspace folder (`workspace.json`, `workspace-findings.json`, `workspace-report.md` and `.html`, with a map of the links). Nothing is written into the projects. For fixes, ignoring, Claude triage, secrets and code checks, choose **Open a project**: it opens the normal Gnawky inside that project (which keeps its own `.gnawky/` there), and leaving it brings you back to the workspace.
+
+```bash
+gnawky workspace                          # list the projects and how they use each other
+gnawky workspace --projects api,web,utils # pick projects (saved for next time)
+gnawky workspace scan                     # check them all and write the workspace report
+gnawky workspace report                   # show the last workspace scan
+```
+
 ### Yarn projects
 
 Gnawky uses `yarn audit` and works out a fix for each vulnerable package, without extra registry calls:

@@ -49,22 +49,24 @@ export function bundledReactVersion(dir) {
 
 // ---- GitHub API, with an on-disk cache for values that never change ----
 
-const cacheFile = (dir) => path.join(dir, OUT_DIR, 'cache', 'next-bundled-react.json');
+// cacheDir: where to keep the cache instead of <project>/.gnawky/cache (the workspace scan keeps
+// it in the workspace folder, so scanning a project writes nothing into it).
+const cacheFile = (dir, cacheDir) => path.join(cacheDir ?? path.join(dir, OUT_DIR, 'cache'), 'next-bundled-react.json');
 
-function loadCache(dir) {
+function loadCache(dir, cacheDir) {
   try {
-    const c = JSON.parse(fs.readFileSync(cacheFile(dir), 'utf8'));
+    const c = JSON.parse(fs.readFileSync(cacheFile(dir, cacheDir), 'utf8'));
     return { releases: c.releases ?? {}, disclosed: c.disclosed ?? {} };
   } catch {
     return { releases: {}, disclosed: {} };
   }
 }
 
-function saveCache(dir, cache) {
+function saveCache(dir, cache, cacheDir) {
   try {
-    ensureOutDir(dir);
-    fs.mkdirSync(path.dirname(cacheFile(dir)), { recursive: true });
-    fs.writeFileSync(cacheFile(dir), JSON.stringify(cache, null, 2) + '\n');
+    if (!cacheDir) ensureOutDir(dir);
+    fs.mkdirSync(path.dirname(cacheFile(dir, cacheDir)), { recursive: true });
+    fs.writeFileSync(cacheFile(dir, cacheDir), JSON.stringify(cache, null, 2) + '\n');
   } catch {
     /* the cache is only an optimization */
   }
@@ -110,7 +112,7 @@ const releaseLine = (v) => {
 const affects = (adv, version) => (adv.vulnerabilities ?? []).some((v) => RSC_PACKAGES.includes(v.package?.name)
   && v.vulnerable_version_range && satisfies(version, v.vulnerable_version_range.replace(/,/g, ' ')));
 
-export async function scanNextBundledReact(dir) {
+export async function scanNextBundledReact(dir, { cacheDir } = {}) {
   let next;
   try {
     next = JSON.parse(fs.readFileSync(path.join(nextDir(dir), 'package.json'), 'utf8')).version;
@@ -124,7 +126,7 @@ export async function scanNextBundledReact(dir) {
   if (!bundled) return { skipped: `could not read the React version bundled in next@${next}` };
   const line = releaseLine(bundled);
 
-  const cache = loadCache(dir);
+  const cache = loadCache(dir, cacheDir);
   try {
     const released = await releaseDate(next, cache);
     if (!released) return { skipped: `no GitHub release found for next@${next}, so its release date is unknown` };
@@ -172,6 +174,6 @@ export async function scanNextBundledReact(dir) {
     if (e instanceof ApiError) return { error: e.message };
     throw e;
   } finally {
-    saveCache(dir, cache);
+    saveCache(dir, cache, cacheDir);
   }
 }

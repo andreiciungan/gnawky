@@ -27,6 +27,7 @@ import { recommendPin } from './overrides.js';
 import { detectScripts, diffFindings, VERIFY_SCRIPTS } from './verify.js';
 import { scanDependencies } from './scanners.js';
 import { saveFixRecord } from './fixlog.js';
+import { shipsToProd, priorityTier, prodFirstCount, scopeText, groupScopeText } from './prod.js';
 
 export class UsageError extends Error {}
 
@@ -75,6 +76,10 @@ function isStale(dir, result) {
 
 // ------------------------------------------------------------------ findings
 
+const PRIORITY = ['fix for production first', 'ships to production', 'dev only'];
+const SCOPES = ['production', 'dev-only'];
+const scopeKey = (f) => (shipsToProd(f) ? 'production' : 'dev-only');
+
 const take = (t) => ({ verdict: t.verdict, urgency: t.verdict === 'false-positive' ? null : t.urgency, reason: t.reason });
 
 /** The grouped view the app shows, as plain data. */
@@ -91,6 +96,8 @@ function groupedItems(findings, triage) {
       alsoCovers: alsoFixes(g) || null,
       tool: [...new Set(g.findings.map((f) => f.tool))].join(', '),
       location: isGroup(g) ? null : g.lead.file ? `${g.lead.file}${g.lead.line ? `:${g.lead.line}` : ''}` : null,
+      priority: PRIORITY[Math.min(...g.findings.map(priorityTier))],
+      production: groupScopeText(g.findings),
       fixes: groupFixes(g).map((x) => ({ type: x.fix?.type, detail: x.fix?.detail, automatic: x.auto, findings: x.findings.length })),
       claude: takes.map(({ package: p, t }) => ({ package: p, ...take(t) })),
       findings: g.findings.map((f) => ({
@@ -102,6 +109,7 @@ function groupedItems(findings, triage) {
         url: f.url,
         cwe: f.cwe?.length ? f.cwe : undefined,
         description: f.description,
+        production: scopeText(f) ?? undefined,
         claude: triage.entries[f.fingerprint] ? take(triage.entries[f.fingerprint]) : undefined,
       })),
     };
@@ -118,6 +126,7 @@ function summaryOf(dir, result) {
     offline: result.offline,
     counts,
     total: result.findings.length,
+    productionFirst: prodFirstCount(result.findings),
     ignored: result.ignoredCount ?? 0,
     scanners: result.tools.map((t) => ({ name: t.name, status: t.status, findings: t.count, message: t.message ?? t.note })),
     reports: { markdown: reportFile(dir), html: htmlReportFile(dir) },
@@ -130,10 +139,12 @@ function printFindings(dir, result, triage) {
   const counts = SEVERITY_ORDER.filter((s) => sum.counts[s]).map((s) => `${sum.counts[s]} ${s}`).join(', ');
   out(`Scan of ${dir} from ${new Date(result.date).toLocaleString()}${sum.stale ? ' (package.json or the lockfile changed since: rescan)' : ''}`);
   out(`${sum.total} finding(s)${counts ? `: ${counts}` : ''} in ${items.length} item(s)${sum.ignored ? `, ${sum.ignored} ignored` : ''}`);
+  if (sum.productionFirst) out(`${sum.productionFirst} critical/high finding(s) ship to production: fix those first (listed first).`);
   for (const t of result.tools) out(`  ${t.status === 'ran' ? '✔' : '–'} ${t.name}: ${t.status === 'ran' ? `${t.count} finding(s)` : `${t.status} (${t.message})`}`);
   if (result.tools.every((t) => t.status !== 'ran')) out('  No scanner ran, so "no findings" proves nothing.');
   for (const it of items) {
     out(`\n[${it.severity.toUpperCase()}] ${it.title}${it.count > 1 ? `  (${it.severities})` : ''}${it.location ? `  ${it.location}` : ''}`);
+    if (it.production) out(`  Production: ${it.production}${it.priority === PRIORITY[0] ? ' - fix first' : ''}`);
     if (it.alsoCovers) out(`  Also covers: ${it.alsoCovers} (installed by ${it.package}; npm expects this upgrade to fix them, not checked)`);
     for (const x of it.fixes) out(`  Fix${it.fixes.length > 1 ? ` (${x.findings})` : ''}: ${x.automatic ? '[automatic] ' : '[manual] '}${x.detail}`);
     for (const c of it.claude) {
@@ -145,15 +156,16 @@ function printFindings(dir, result, triage) {
   out(`\nReports: ${sum.reports.markdown}\n         ${sum.reports.html}`);
 }
 
-/** `gnawky findings [--json] [--min-severity <level>]` */
+/** `gnawky findings [--json] [--min-severity <level>] [--prod-only]` */
 export function findingsCommand(dir, argv) {
-  const o = parse(argv, ['json']);
+  const o = parse(argv, ['json', 'prod-only']);
   const cfg = loadConfig(dir);
   if (o['min-severity']) {
     if (!SEVERITY_ORDER.includes(o['min-severity'])) throw new UsageError(`--min-severity must be one of: ${SEVERITY_ORDER.join(', ')}`);
     cfg.minSeverity = o['min-severity'];
   }
   const result = lastScan(dir, cfg);
+  if (o['prod-only']) result.findings = result.findings.filter(shipsToProd);
   showFindings(dir, result, { json: o.json });
 }
 
@@ -187,7 +199,7 @@ export function reportCommand(dir, argv) {
 const SEVERITIES_DESC = ['critical', 'high', 'medium', 'low', 'info'];
 
 /**
- * `gnawky triage [--severity a,b] [--sources a,b] [--all] [--parallel n] [--yes] [--json]`
+ * `gnawky triage [--severity a,b] [--sources a,b] [--scope production,dev-only] [--all] [--parallel n] [--yes] [--json]`
  * Without --yes it only prints what would be sent and the estimate, so the caller can ask first.
  */
 export async function triageCommand(dir, argv) {
@@ -207,8 +219,9 @@ export async function triageCommand(dir, argv) {
   const last = cfg.triageFilter ?? {};
   const severities = list(o.severity, SEVERITIES_DESC, 'severity') ?? last.severities ?? ['critical', 'high'];
   const sources = list(o.sources, Object.keys(TRIAGE_SOURCES), 'sources') ?? last.sources ?? Object.keys(TRIAGE_SOURCES);
+  const scopes = list(o.scope, SCOPES, 'scope') ?? last.scopes ?? ['production'];
   const parallel = Math.max(1, Math.min(MAX_PARALLEL, Number(o.parallel ?? last.parallel ?? 1) || 1));
-  const todo = pool.filter((f) => severities.includes(f.severity) && sources.includes(findingSource(f)));
+  const todo = pool.filter((f) => severities.includes(f.severity) && sources.includes(findingSource(f)) && scopes.includes(scopeKey(f)));
   const items = triageItems(todo);
   const batches = batchCount(items);
   const plan = {
@@ -219,12 +232,13 @@ export async function triageCommand(dir, argv) {
     estimate: triageEstimate(batches, parallel),
     severities,
     sources,
+    scopes,
     alreadyTriaged: all.length - all.filter((f) => !triage.entries[f.fingerprint]).length,
     available: all.length,
   };
 
   if (!todo.length) {
-    const why = pool.length ? `none match --severity ${severities.join(',')} --sources ${sources.join(',')}` : 'every finding already has a verdict (add --all to redo them)';
+    const why = pool.length ? `none match --severity ${severities.join(',')} --sources ${sources.join(',')} --scope ${scopes.join(',')}` : 'every finding already has a verdict (add --all to redo them)';
     if (o.json) out(JSON.stringify({ started: false, plan, reason: why }, null, 2));
     else out(`Nothing to triage: ${why}.`);
     return;
@@ -246,7 +260,7 @@ export async function triageCommand(dir, argv) {
     return;
   }
 
-  cfg.triageFilter = { severities, sources, parallel };
+  cfg.triageFilter = { severities, sources, scopes, parallel };
   // Saved like the app does, so the app's triage screen starts from the same choice.
   const { saveConfig } = await import('./config.js');
   saveConfig(dir, cfg);

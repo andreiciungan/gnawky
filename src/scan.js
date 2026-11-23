@@ -6,6 +6,7 @@ import { renderMarkdown } from './report.js';
 import { renderHtml } from './html-report.js';
 import { OUT_DIR, ensureOutDir } from './config.js';
 import { loadTriage } from './triage.js';
+import { classifyScope, priorityTier } from './prod.js';
 
 export async function performScan(dir, cfg, log = () => {}, { onStep } = {}) {
   const { findings, tools } = await runAllScanners(dir, log, {
@@ -15,6 +16,7 @@ export async function performScan(dir, cfg, log = () => {}, { onStep } = {}) {
     enabled: cfg.scanners,
     semgrepConfigs: cfg.semgrepConfigs,
   });
+  classifyScope(dir, findings);
   const ignored = new Set(loadIgnores(dir).map((i) => i.fingerprint));
   const notIgnored = findings.filter((f) => !ignored.has(f.fingerprint));
   const result = {
@@ -30,11 +32,14 @@ export async function performScan(dir, cfg, log = () => {}, { onStep } = {}) {
   return result;
 }
 
-/** Findings at or above the minimum severity, most severe first. */
+/**
+ * Findings at or above the minimum severity: critical/high that ship to production first, then
+ * the rest that ship, then dev-only ones; most severe first within each.
+ */
 export function visibleFindings(findings, cfg) {
   return findings
     .filter((f) => rank(f.severity) <= rank(cfg.minSeverity))
-    .sort((a, b) => rank(a.severity) - rank(b.severity));
+    .sort((a, b) => priorityTier(a) - priorityTier(b) || rank(a.severity) - rank(b.severity));
 }
 
 /** Drops findings listed in .gnawky-ignore.json, then applies the severity filter. */

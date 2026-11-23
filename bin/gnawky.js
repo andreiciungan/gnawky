@@ -20,9 +20,11 @@ Headless mode (CI, scripts, the Claude plugin):
 
 Commands (run inside the project; all but scan use the last scan in .gnawky/):
   gnawky scan [path] [--json]    scan, then list the findings grouped like the app
-  gnawky findings [--json]       list the last scan's findings, grouped, with Claude's verdicts
+  gnawky findings [--json] [--prod-only]
+                                 list the last scan's findings, grouped, with Claude's verdicts;
+                                 critical/high ones that ship to production come first
   gnawky report [--open]         rewrite the Markdown and HTML reports, optionally open the HTML one
-  gnawky triage [--severity critical,high] [--sources dependencies,code,secrets] [--all] [--parallel 1-3]
+  gnawky triage [--severity critical,high] [--sources dependencies,code,secrets] [--scope production,dev-only] [--all] [--parallel 1-3]
                                  show what Claude triage would check; add --yes to run it
   gnawky ignore <id|GHSA|CVE|package>... --reason "why"
                                  ignore findings (a package ignores its whole grouped item)
@@ -31,6 +33,12 @@ Commands (run inside the project; all but scan use the last scan in .gnawky/):
   gnawky fix --keep | --undo     keep the fix branch (and save the fixed advisories) or throw it away
   gnawky pre-commit              check dependencies in the staged lockfile (used by the git hook);
                                  fails only on new high/critical findings (--min-severity to change)
+
+Workspace mode (a folder holding several projects; run it in that folder):
+  gnawky                         in a folder without package.json: pick projects, see how they're linked, scan them all
+  gnawky workspace [--projects a,b | --all]   list the projects and how they use each other
+  gnawky workspace scan [--json] [--offline]  check every picked project's dependencies
+  gnawky workspace report        show the last workspace scan
 
 Options for headless mode (override .gnawky/config.json):
   --min-severity <level>   critical | high | medium | low | info
@@ -81,6 +89,12 @@ async function main() {
     return;
   }
   const sub = process.argv[2];
+  if (sub === 'workspace') {
+    const ws = await import('../src/workspace-cli.js');
+    if (process.argv.slice(3).some((a) => a === '-h' || a === '--help')) { console.log(ws.WORKSPACE_HELP); return; }
+    await ws.workspaceCommand(process.cwd(), process.argv.slice(3));
+    return;
+  }
   const COMMANDS = { findings: 'findingsCommand', report: 'reportCommand', triage: 'triageCommand', ignore: 'ignoreCommand', fix: 'fixCommand' };
   if (COMMANDS[sub]) {
     if (process.argv.slice(3).some((a) => a === '-h' || a === '--help')) { console.log(HELP); return; }
