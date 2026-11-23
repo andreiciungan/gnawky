@@ -42,6 +42,9 @@ import {
   scopeText, groupScopeText, shipsToProd, isProdFirst, prodFirstCount, priorityTier,
 } from './prod.js';
 import {
+  startScripts, guessUrl, validUrl, parsePaths, urlAnswers, waitForUrl, startServer, reportPath, readResult, buildSmokeTask,
+} from './smoke.js';
+import {
   detectScripts, runScript, describeResult, packagesWithInstallScripts, diffFindings, rebuild,
 } from './verify.js';
 
@@ -564,9 +567,11 @@ async function verifyScreen(s, report) {
     const broken = regressions(report);
     const failed = report.scripts.filter((n) => report.after[n] && !report.after[n].ok);
     const native = broken.length ? packagesWithInstallScripts(s.dir) : [];
+    if (report.smoke) printSmokeResult(s, report.smoke);
     const choice = await select('What now?', [
       { label: 'Keep the changes on this branch', value: 'keep' },
       { label: `Undo everything (back to ${report.base}, delete the branch)`, value: 'undo' },
+      { label: report.smoke ? 'Smoke test in the browser again' : 'Smoke test in the browser with Claude (optional)', value: 'smoke', disabled: s.cfg.offline },
       ...(failed.length ? [{ label: 'Show the output of the failed scripts', value: 'output' }] : []),
       ...(broken.length && native.length
         ? [{ label: `Run npm rebuild, then retry (runs install scripts of ${native.length} package(s))`, value: 'rebuild' }] : []),
@@ -609,6 +614,10 @@ async function verifyScreen(s, report) {
       await launchClaude(s, buildVerifyPrompt(s, report, broken));
       continue;
     }
+    if (choice === 'smoke') {
+      await smokeScreen(s, report);
+      continue;
+    }
 
     // Keep (also when the user just backs out).
     const saved = await saveFixLog(s, report, audit);
@@ -633,6 +642,121 @@ async function verifyScreen(s, report) {
     console.log(c.gray(`  To throw it all away:  git checkout -- ${files} && git checkout ${report.base} && git branch -D ${report.branch}`));
     await pause();
     return;
+  }
+}
+
+// ------------------------------------------------------------------ browser smoke test
+
+function printSmokeResult(s, r) {
+  const color = { PASS: c.green, FAIL: c.red, PARTIAL: c.yellow }[r.result] ?? c.gray;
+  console.log(`${c.bold('Browser smoke test:')} ${color(r.result)}${r.summary ? `  ${r.summary}` : ''}`);
+  console.log(c.gray(`  Report: ${path.relative(s.dir, r.file)}\n`));
+}
+
+/** Asks for the app URL, how it starts and which pages to check; saved per project. False if cancelled. */
+async function smokeSetup(s) {
+  const old = s.cfg.smoke ?? {};
+  header(s);
+  console.log(c.bold('Browser smoke test: setup for this project\n'));
+  console.log('Claude opens your app in Chrome after a fix and checks that the pages still work.');
+  console.log(c.gray('Saved for this project; change it any time from the smoke test screen.\n'));
+  let url;
+  for (;;) {
+    const def = old.url ?? guessUrl(s.dir);
+    url = (await ask(`App URL ${c.gray(`[${def}]`)}: `)) || def;
+    if (validUrl(url)) break;
+    console.log(c.yellow('Enter a full http:// or https:// URL, for example http://localhost:3000/'));
+  }
+  const scripts = startScripts(s.dir);
+  console.log();
+  const start = await select('Who starts the app for the test?', [
+    ...scripts.map((n) => ({ label: `Gnawky runs "${runLabel(s.pm, n)}", and stops it after the test`, value: `script:${n}` })),
+    { label: 'I start it myself (Gnawky waits until the URL answers)', value: 'self' },
+  ], { initial: old.start === 'self' ? scripts.length : Math.max(0, scripts.indexOf(old.script)) });
+  if (!start) return false;
+  console.log();
+  const defPaths = (old.paths ?? ['/']).join(', ');
+  const paths = parsePaths((await ask(`Pages to check (paths, comma-separated) ${c.gray(`[${defPaths}]`)}: `)) || defPaths);
+  s.cfg.smoke = start === 'self' ? { url, start: 'self', paths } : { url, start: 'script', script: start.slice(7), paths };
+  saveConfig(s.dir, s.cfg);
+  return true;
+}
+
+/** Starts the app if needed, hands the browser test to Claude, then shows its result. */
+async function smokeScreen(s, report) {
+  if (!isAvailable('claude')) {
+    header(s);
+    console.log(`Claude Code is not installed. Install it with: ${c.accent('npm install -g @anthropic-ai/claude-code')}`);
+    return pause();
+  }
+  if (!s.cfg.smoke && !(await smokeSetup(s))) return;
+  for (;;) {
+    const cfg = s.cfg.smoke;
+    header(s);
+    console.log(c.bold('Browser smoke test with Claude\n'));
+    console.log(`  App URL     ${cfg.url}`);
+    console.log(`  Started by  ${cfg.start === 'self' ? 'you' : `Gnawky (${runLabel(s.pm, cfg.script)})`}`);
+    console.log(`  Pages       ${cfg.paths.join(', ')}`);
+    console.log(c.gray('\n  Needs Chrome with the Claude in Chrome extension. Claude opens a new tab, checks each'));
+    console.log(c.gray('  page, writes a report, and you exit Claude (/exit) to come back here.\n'));
+    const pick = await select('', [
+      { label: 'Start the smoke test', value: 'go' },
+      { label: 'Change these settings', value: 'setup' },
+      { label: 'Back', value: null },
+    ]);
+    if (!pick) return;
+    if (pick === 'setup') { await smokeSetup(s); continue; }
+    break;
+  }
+  const cfg = s.cfg.smoke;
+  let server = null;
+  try {
+    if (await urlAnswers(cfg.url)) {
+      console.log(c.green(`\n  ✔ ${cfg.url} answers${cfg.start === 'script' ? ' already, so Gnawky uses it as it is' : ''}.`));
+    } else if (cfg.start === 'script') {
+      server = startServer(s.dir, s.pm, cfg.script);
+      const done = ticker(`starting the app (${runLabel(s.pm, cfg.script)}) and waiting for ${cfg.url}`);
+      const up = await waitForUrl(cfg.url, { isAlive: server.alive });
+      done(up ? `${cfg.url} answers` : `${cfg.url} did not answer`, up ? 'ok' : 'fail');
+      if (!up) {
+        console.log(c.gray(`\n${server.tail()}\n`));
+        console.log(c.gray(`Full log: ${path.relative(s.dir, server.logFile)}`));
+        if (!(await confirm('Hand over to Claude anyway?'))) return;
+      }
+    } else {
+      for (;;) {
+        console.log(c.yellow(`\n  ${cfg.url} doesn't answer yet. Start your app (on this branch), then press Enter.`));
+        await pause();
+        if (await urlAnswers(cfg.url)) break;
+        if (!(await confirm(`Still no answer from ${cfg.url}. Try again?`))) return;
+      }
+    }
+    const file = reportPath(s.dir, report.branch);
+    const smokeDir = fs.realpathSync(path.dirname(file));
+    const changes = report.steps.filter((st) => st.status === 'applied').map((st) => st.label);
+    const startedAt = Date.now();
+    const launched = await launchClaude(s, buildSmokeTask({
+      dir: s.dir, url: cfg.url, paths: cfg.paths, branch: report.branch, base: report.base, changes, report: file,
+    }), {
+      // Writes allowed only in .gnawky/smoke/ without asking; anything else asks first.
+      args: ['--chrome', '--allowedTools', `Edit(/${smokeDir}/**)`, '--disallowedTools', 'NotebookEdit'],
+      notice: [
+        '  • This starts Claude Code with Claude in Chrome. Claude opens your app in a new Chrome tab',
+        `    (${new URL(cfg.url).origin} only) and checks the pages you listed.`,
+        '  • What Claude sees in the browser (page content, console and network messages) is sent to',
+        '    Anthropic. Use a local or test environment, not production with real customer data.',
+        '  • Claude is told not to log in, buy, or submit forms; if a page needs a login, it asks you.',
+        `  • Claude writes its report to ${path.relative(s.dir, file)}; any other file change needs your approval.`,
+        '  • When it\'s done, exit Claude (/exit) to come back to Gnawky.',
+      ],
+    });
+    if (!launched) return;
+    report.smoke = readResult(file, startedAt) ?? { result: 'UNKNOWN', summary: 'Claude did not write a report.', file };
+  } finally {
+    if (server) {
+      server.stop();
+      console.log(c.gray('\n  Stopped the app Gnawky started.'));
+    }
   }
 }
 

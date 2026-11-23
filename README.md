@@ -129,6 +129,16 @@ Every scan writes three files to `.gnawky/`: `findings.json`, `security-report.m
 
 Requires Node 18+ and a `package-lock.json` or a Yarn 1 (Classic) `yarn.lock`.
 
+### Browser smoke test after a fix
+
+After a dependency fix, the results screen also offers **Smoke test in the browser with Claude** (optional, needs Claude Code and Chrome with the Claude in Chrome extension; off in offline mode). The first time, you set it up for the project:
+
+1. **The app's local URL.** Gnawky guesses one from the dev script.
+2. **Who starts the app.** Either Gnawky runs a script it finds (`dev`, `start`, …), waits for the URL and stops the app after the test, or you start it yourself and Gnawky waits until the URL answers.
+3. **The pages to check,** as paths such as `/, /cart`.
+
+Claude Code then opens with `--chrome` and visits each page. It checks that the page renders, reads console errors and failed requests, and looks harder at features that use the upgraded packages. You watch it, and can step in when a page needs a login. Claude only writes its report, in `.gnawky/smoke/`, without asking. When you exit Claude, the results screen shows **PASS**, **FAIL** or **PARTIAL**, and you still choose Keep or Undo. What Claude sees in the browser is sent to Anthropic, so test a local or test environment, not production.
+
 ### What to fix first: production
 
 Every dependency finding says whether it **ships to production**. Gnawky works this out from `package.json`, without Claude. A package that one of your `dependencies` brings in counts as production. One that only `devDependencies` bring in counts as dev-only. Test and lint tools (jest, vitest, eslint, @types/…) count as dev-only even when they're listed under `dependencies`, and the finding tells you to move them. In Next.js projects, devDependencies that aren't test or lint tools count as production, because the app can bundle them. Code and secret findings are always production. A finding whose dependency path can't be found counts as production, to be safe.
