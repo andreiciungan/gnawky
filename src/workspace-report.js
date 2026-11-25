@@ -256,6 +256,18 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
 
   const throughList = d.through.map((t) => `<li><b>${esc(t.rel)}</b> brings ${esc(plural(t.advisories, 'advisory', 'advisories'))} into ${esc(t.into.join(', '))}</li>`).join('');
 
+  // Each count as its own colored chip: prod first, then one per severity, then likely false positives.
+  const countChips = (p) => {
+    const pf = prodFirstCount(p.findings);
+    const fp = triageCounts([p]).falsePositive;
+    const sevs = SEVERITY_ORDER.map((sv) => [sv, p.findings.filter((f) => f.severity === sv).length]).filter(([, n]) => n);
+    if (!sevs.length) return '<span class="chip chip-none">no findings</span>';
+    return [
+      pf ? `<span class="tri prod-first">${pf} prod first</span>` : '',
+      ...sevs.map(([sv, n]) => `<span class="chip sev-${sv}">${n} ${sv}</span>`),
+      fp ? `<span class="tri tri-false-positive">${fp} likely false positive</span>` : '',
+    ].join('');
+  };
   const perProject = d.fixOrder.map((p, step) => {
     const notes = (p.notes ?? []).map((n) => `<li class="note-line">Note: ${esc(n)}</li>`).join('');
     const skipped = notes + p.tools.filter((t) => t.status !== 'ran').map((t) => `<li class="muted">${esc(t.name)} ${esc(t.status)}: ${esc(t.message)}</li>`).join('');
@@ -270,7 +282,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
-    return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${prodFirstCount(p.findings) ? `<b class="pf">${prodFirstCount(p.findings)} prod first</b> · ` : ''}${esc(countBySeverity(p.findings) || 'no findings')}${triageCounts([p]).falsePositive ? ` · ${triageCounts([p]).falsePositive} likely false positive` : ''}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
+    return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${countChips(p)}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
   }).join('\n');
 
   return `<!doctype html>
@@ -307,8 +319,11 @@ td a{color:var(--accent)}.scroll{overflow-x:auto}
 .note{margin:12px 0;padding:10px 14px;border:1px solid var(--medium);border-radius:8px}.note ul{margin:6px 0 0;padding-left:18px}
 ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .proj{background:var(--panel);border:1px solid var(--border);border-radius:8px;margin-bottom:8px}
-.proj summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
-.proj .cnt{margin-left:auto;color:var(--muted);font-size:13px}
+.proj summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.proj .cnt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;font-size:13px}
+.chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
+.chip-none{--c:var(--ok)}
+.proj .cnt .prod-first{background:var(--critical);border-color:var(--critical);color:#fff}
 .proj ul{list-style:none;margin:0;padding:4px 14px 12px;border-top:1px solid var(--border)}
 .proj li{padding:8px 0;border-top:1px solid var(--border)}.proj li:first-child{border-top:0}
 .note-line{color:var(--medium)}
