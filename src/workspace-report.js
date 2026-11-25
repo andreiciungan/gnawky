@@ -345,6 +345,7 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .proj .cnt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;font-size:13px}
 .chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
 .chip-none{--c:var(--ok)}
+@media (max-width:640px){.proj summary{padding:10px 12px}.proj .cnt{margin-left:0;flex-basis:100%;justify-content:flex-start}}
 .ai-now{background:var(--accent);border-color:var(--accent);color:#fff}@media (prefers-color-scheme:dark){.ai-now{color:#140b2e}}
 .ai-soon{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent)}
 .proj .cnt .prod-first{background:var(--critical);border-color:var(--critical);color:#fff}
