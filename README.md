@@ -128,7 +128,7 @@ gnawky --json                       # machine-readable output (used by the Claud
 gnawky --offline                    # nothing leaves this computer
 ```
 
-Every scan writes three files to `.gnawky/`: `findings.json`, `security-report.md`, and `security-report.html`. The HTML report is a single self-contained file (no external scripts, styles or fonts, so it works offline). It has severity tiles, a scanner summary, and every finding with full details, plus filters by severity and tool and a text search. It supports dark mode and prints cleanly. In CI, keep it as a build artifact.
+Every scan writes three files to `.gnawky/`: `findings.json`, `security-report.md`, and `security-report.html`. The HTML report is a single self-contained file (no external scripts, styles or fonts, so it works offline). It has severity tiles, a scanner summary, and every finding with full details, plus filters by severity and tool and a text search. Each finding starts with Claude's take (verdict, urgency and reason) once a triage exists, then the suggested fix. It supports dark mode and prints cleanly. In CI, keep it as a build artifact.
 
 Requires Node 18+ and a `package-lock.json` or a Yarn 1 (Classic) `yarn.lock`. With more than one lockfile (say a stale, git-ignored `package-lock.json` in a yarn project), Gnawky goes by package.json's `packageManager` field, then the lockfile committed to git, then the one git doesn't ignore, then the most recently changed. It says which one it chose and why in the fix plan and the workspace notes.
 
@@ -172,7 +172,7 @@ gnawky
 
 1. **Pick the projects** that belong together. The list shows which ones use each other.
 2. **See how they're linked.** Gnawky reads each `package.json` and lockfile. It shows who uses whom, at which installed version, and when projects use different releases of a shared one (a fix there only reaches the projects that move to it). It also gives a fix order: shared projects first, then the ones that use them.
-3. **Check every project's dependencies** (npm/yarn audit, plus the React bundled in Next.js) in one go. The results show advisories found in more than one project, and the advisories each shared project brings into the projects that use it.
+3. **Check every project's dependencies** (npm/yarn audit, plus the React bundled in Next.js) in one go. The results show advisories found in more than one project, and the advisories each shared project brings into the projects that use it. The workspace report starts with the link map and lists the projects in fix order; click a project in the map to open its findings.
 
 **Claude triage** works across the workspace too: right after a scan (before the report), or from the menu. Pick what to check (by default critical and high that ship to production); findings that already have a verdict are skipped. Claude triages one project at a time, reading that project's code, and the verdicts are saved in each project's `.gnawky/triage.json`, so opening the project later uses them. The workspace reports then show Claude's verdict and reason per finding, with likely false positives last.
 
