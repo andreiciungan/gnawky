@@ -86,7 +86,7 @@ export function renderWorkspaceMarkdown(result) {
   out.push(`- **Checked:** dependencies only (npm/yarn audit, and the React bundled in Next.js). Open a project in Gnawky for secrets and code checks.`, '');
 
   const first = prodFirstCount(result.projects.flatMap((p) => p.findings));
-  out.push(`**Fix for production first:** ${first} critical/high finding(s) ship to production across the projects (column "Prod first"). Findings that only devDependencies bring in are listed last.`, '');
+  out.push(`**Fix for production first:** ${first} critical/high finding(s) ship to production across the projects. Findings that only devDependencies bring in are listed last.`, '');
   const tl = triageLine(result.projects);
   if (tl) out.push(`**${tl}** Likely false positives are listed last in each project. Verdicts are suggestions.`, '');
   out.push('## How they are linked', '');
@@ -122,7 +122,7 @@ export function renderWorkspaceMarkdown(result) {
 
   out.push('## Findings per project', '', 'In the order to fix them: shared projects before the projects that use them, then the most urgent first.', '');
   for (const p of d.fixOrder) {
-    out.push(`### ${d.fixOrder.indexOf(p) + 1}. ${p.rel} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
+    out.push(`### ${d.fixOrder.indexOf(p) + 1}. ${p.rel}, ${p.pm ?? 'no lockfile'} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
     for (const n of p.notes ?? []) out.push(`- _Note: ${cell(n)}_`);
     for (const t of p.tools) if (t.status !== 'ran') out.push(`- _${t.name} ${t.status}: ${cell(t.message)}_`);
     for (const g of projectGroups(p)) {
@@ -137,15 +137,6 @@ export function renderWorkspaceMarkdown(result) {
     if (!p.findings.length && p.tools.some((t) => t.status === 'ran')) out.push('No findings at or above the selected severity.');
     out.push('');
   }
-
-  out.push('## Projects', '', '| Project | Package manager | Dependency audit | Prod first | Findings | Uses |', '|---|---|---|---|---|---|');
-  for (const p of result.projects) {
-    const a = d.audit(p);
-    const status = !a ? 'n/a' : a.status === 'ran' ? 'ran' : `${a.status}: ${a.message}`;
-    const uses = usesOf(result, p.rel).map((l) => `${l.to} ${l.installed ?? l.spec}`).join(', ');
-    out.push(`| ${cell(p.rel)} | ${cell(p.pm ?? 'no lockfile')} | ${cell(status)} | ${prodFirstCount(p.findings)} | ${cell(countBySeverity(p.findings) || 'none')} | ${cell(uses)} |`);
-  }
-  out.push('');
 
   const sharedAdvisories = d.shared.reduce((n, e) => n + e.advisories.length, 0);
   out.push(`## Packages in more than one project (${d.shared.length})`, '');
@@ -241,14 +232,6 @@ export function renderWorkspaceHtml(result) {
 
   const prodFirstTotal = prodFirstCount(allFindings);
   const devTotal = allFindings.filter((f) => !shipsToProd(f)).length;
-  const projectRows = result.projects.map((p) => {
-    const a = d.audit(p);
-    const status = !a ? '<span class="muted">n/a</span>' : a.status === 'ran' ? esc(a.name) : `<span class="muted">${esc(a.status)}: ${esc(a.message)}</span>`;
-    const uses = usesOf(result, p.rel).map((l) => `<code>${esc(l.name)}@${esc(l.installed ?? l.spec)}</code>`).join(' ');
-    const pf = prodFirstCount(p.findings);
-    return `<tr><td><a href="#p-${esc(p.rel)}"><b>${esc(p.rel)}</b></a></td><td>${esc(p.pm ?? 'no lockfile')}</td><td>${status}</td><td>${pf ? `<b class="pf">${pf}</b>` : '0'}</td><td>${esc(countBySeverity(p.findings) || 'none')}</td><td>${uses}</td></tr>`;
-  }).join('');
-
   const versionNotes = d.versions.map((v) => `<li><code>${esc(v.name)}</code>: ${v.specs.map((s) => `<b>${esc(s.spec)}</b> <span class="muted">(${esc(s.from.join(', '))})</span>`).join(' · ')}</li>`).join('');
   const differLibs = [...new Set(d.differs.map((l) => l.to))];
   const linksSection = result.links.length ? `
@@ -287,7 +270,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
-    return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc(p.name !== p.rel ? p.name : '')}</span><span class="cnt">${prodFirstCount(p.findings) ? `<b class="pf">${prodFirstCount(p.findings)} prod first</b> · ` : ''}${esc(countBySeverity(p.findings) || 'no findings')}${triageCounts([p]).falsePositive ? ` · ${triageCounts([p]).falsePositive} likely false positive` : ''}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
+    return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${prodFirstCount(p.findings) ? `<b class="pf">${prodFirstCount(p.findings)} prod first</b> · ` : ''}${esc(countBySeverity(p.findings) || 'no findings')}${triageCounts([p]).falsePositive ? ` · ${triageCounts([p]).falsePositive} likely false positive` : ''}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
   }).join('\n');
 
   return `<!doctype html>
@@ -361,8 +344,6 @@ ${allFindings.some((f) => f.scope) ? `<div class="controls"><select id="scope" a
 ${perProject}
 
 
-<h2>Projects</h2>
-<div class="scroll"><table><thead><tr><th>Project</th><th>Package manager</th><th>Dependency audit</th><th>Prod first</th><th>Findings</th><th>Uses</th></tr></thead><tbody>${projectRows}</tbody></table></div>
 
 <h2>Packages in more than one project <span class="muted">(${d.shared.length})</span></h2>
 ${d.shared.length ? `<p class="muted">${d.shared.reduce((n, e) => n + e.advisories.length, 0)} advisories in ${d.shared.length} packages, grouped per package like in each project. The fix can differ per project: it depends on what installs the package there.</p>${sharedCards}` : '<div class="empty-state">Every vulnerable package was found in one project only.</div>'}
