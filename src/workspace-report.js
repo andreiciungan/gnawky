@@ -333,7 +333,6 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .fixline{color:var(--muted);font-size:13px;margin-top:2px}
 .sev-none{--c:var(--ok)}.pf{color:var(--critical)}
 .proj li.fp{opacity:.7}
-.claude+.controls{margin-top:14px}
 .proj li>.sev,.proj li>.tri{margin-right:4px}
 .take-sm{margin:8px 0 2px;padding:8px 12px 10px}.take-sm p{font-size:14.5px;margin-top:4px}
 .proj{box-shadow:var(--shadow);border-radius:12px}
@@ -351,7 +350,6 @@ ${BRAND}
 <p>Critical and high findings that ship to production. ${devTotal ? `${devTotal} ${devTotal === 1 ? "comes" : "come"} only from devDependencies (build, test and lint tools) and are listed last in each project.` : ''} Worked out from package.json; in Next.js projects, devDependencies that aren't test or lint tools count as production, since they can be bundled.</p></div>
 ${triageLine(result.projects) ? `<div class="claude claude-ai"><div><div class="take-h">${SPARK}<b>${esc(triageLine(result.projects))}</b></div><p>Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code: check the reason before you rely on one.</p></div></div>` : ''}
 
-${allFindings.some((f) => f.scope) ? `<div class="controls"><select id="scope" aria-label="Filter by production"><option value="">All (${allFindings.length})</option><option value="prod"${allFindings.length - devTotal ? '' : ' disabled'}>Production only (${allFindings.length - devTotal})</option><option value="dev"${devTotal ? '' : ' disabled'}>Dev only (${devTotal})</option></select></div>` : ''}
 
 <h2>How they are linked</h2>
 ${linksSection}
@@ -359,6 +357,7 @@ ${linksSection}
 ${throughList ? `<h2>Brought in by your own projects</h2><p class="muted">Advisories that reach a project through another picked project, from each project's lockfile.</p><ul>${throughList}</ul>` : ''}
 <h2>Findings per project <span class="muted">(${d.total})</span></h2>
 <p class="muted">In the order to fix them: shared projects before the projects that use them (release the fix, then bump it), then the most urgent first.</p>
+${allFindings.some((f) => f.scope) ? `<div class="controls"><select id="scope" aria-label="Filter by production"><option value="">All (${allFindings.length})</option><option value="prod"${allFindings.length - devTotal ? '' : ' disabled'}>Production only (${allFindings.length - devTotal})</option><option value="dev"${devTotal ? '' : ' disabled'}>Dev only (${devTotal})</option></select></div>` : ''}
 ${perProject}
 
 
