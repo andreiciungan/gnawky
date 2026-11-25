@@ -33,10 +33,19 @@ const urgencyCounts = (projects) => {
   }
   return n;
 };
-const urgencyChips = (n) =>
-  `${n.now ? `<span class="tri tri-v ai-now" title="Claude says to fix now">${n.now} fix now</span>` : ''}${n.soon ? `<span class="tri tri-v ai-soon" title="Claude says to fix soon">${n.soon} fix soon</span>` : ''}`;
-
-const mdUrgency = (n) => (n.now || n.soon ? `; Claude: ${[n.now && `${n.now} fix now`, n.soon && `${n.soon} fix soon`].filter(Boolean).join(', ')}` : '');
+/** Claude's triage across the workspace as chips, in the style of the project rows. Zero counts are left out. */
+const triageChips = (projects) => {
+  const u = urgencyCounts(projects);
+  const n = triageCounts(projects);
+  return [
+    [u.now, 'fix now', 'ai-now'],
+    [u.soon, 'fix soon', 'ai-soon'],
+    [n.real, 'real', 'chip-real'],
+    [n.unsure, 'need a human', 'chip-unsure'],
+    [n.falsePositive, 'likely false positive', 'chip-none'],
+    [n.none, 'not triaged', 'chip-muted'],
+  ].filter(([c]) => c).map(([c, l, cls]) => `<span class="chip ${cls}">${c} ${l}</span>`).join('');
+};
 
 const triageLine = (projects) => {
   const n = triageCounts(projects);
@@ -138,7 +147,7 @@ export function renderWorkspaceMarkdown(result) {
 
   out.push('## Findings per project', '', 'In the order to fix them: shared projects before the projects that use them, then the most urgent first.', '');
   for (const p of d.fixOrder) {
-    out.push(`### ${d.fixOrder.indexOf(p) + 1}. ${p.rel}, ${p.pm ?? 'no lockfile'} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''}${mdUrgency(urgencyCounts([p]))})`, '');
+    out.push(`### ${d.fixOrder.indexOf(p) + 1}. ${p.rel}, ${p.pm ?? 'no lockfile'} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
     for (const n of p.notes ?? []) out.push(`- _Note: ${cell(n)}_`);
     for (const t of p.tools) if (t.status !== 'ran') out.push(`- _${t.name} ${t.status}: ${cell(t.message)}_`);
     for (const g of projectGroups(p)) {
@@ -280,7 +289,6 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
     if (!sevs.length) return '<span class="chip chip-none">no findings</span>';
     return [
       pf ? `<span class="tri prod-first">${pf} prod first</span>` : '',
-      urgencyChips(urgencyCounts([p])),
       ...sevs.map(([sv, n]) => `<span class="chip sev-${sv}">${n} ${sv}</span>`),
       fp ? `<span class="tri tri-false-positive">${fp} likely false positive</span>` : '',
     ].join('');
@@ -346,8 +354,8 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
 .chip-none{--c:var(--ok)}
 @media (max-width:640px){.proj summary{padding:10px 12px}.proj .cnt{margin-left:0;flex-basis:100%;justify-content:flex-start}}
-.ai-now{background:var(--accent);border-color:var(--accent);color:#fff}@media (prefers-color-scheme:dark){.ai-now{color:#140b2e}}
-.ai-soon{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent)}
+.chip.ai-now{--c:var(--accent);background:var(--accent);color:#fff}@media (prefers-color-scheme:dark){.chip.ai-now{color:#140b2e}}
+.ai-soon{--c:var(--accent)}.chip-real{--c:var(--high)}.chip-unsure{--c:var(--medium)}.chip-muted{--c:var(--muted)}
 .proj .cnt .prod-first{background:var(--critical);border-color:var(--critical);color:#fff}
 .proj ul{list-style:none;margin:0;padding:4px 14px 12px;border-top:1px solid var(--border)}
 .proj li{padding:8px 0;border-top:1px solid var(--border)}.proj li:first-child{border-top:0}
@@ -371,7 +379,7 @@ ${BRAND}
 <div class="tiles">${tiles}</div>
 <div class="claude"><div class="tile prod-tile" style="cursor:default"><span class="n">${prodFirstTotal}</span><span class="l">Fix for production first</span></div>
 <p>Critical and high findings that ship to production. ${devTotal ? `${devTotal} ${devTotal === 1 ? "comes" : "come"} only from devDependencies (build, test and lint tools) and are listed last in each project.` : ''} Worked out from package.json; in Next.js projects, devDependencies that aren't test or lint tools count as production, since they can be bundled.</p></div>
-${triageLine(result.projects) ? `<div class="claude claude-ai"><div><div class="take-h">${SPARK}<b>${esc(triageLine(result.projects))}</b>${urgencyChips(urgencyCounts(result.projects))}</div><p>Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code: check the reason before you rely on one.</p></div></div>` : ''}
+${triageLine(result.projects) ? `<div class="claude claude-ai"><div><div class="take-h">${SPARK}<b>Claude triage</b></div><div class="stats">${triageChips(result.projects)}</div><p>Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code: check the reason before you rely on one.</p></div></div>` : ''}
 
 
 <h2>How they are linked</h2>
