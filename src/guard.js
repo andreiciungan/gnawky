@@ -18,6 +18,7 @@ import { parseLockfile } from './yarn.js';
 import { PKG_NAME, packageManager } from './pm.js';
 import { loadConfig } from './config.js';
 import { c, ticker } from './ui.js';
+import { compare, isBreaking, parse, satisfies } from './semver.js';
 
 const err = process.stderr;
 const say = (s = '') => err.write(`${s}\n`);
@@ -210,36 +211,118 @@ const ago = (iso) => {
   return h < 48 ? `${Math.max(1, Math.round(h))} hour(s) ago` : `${Math.round(h / 24)} days ago`;
 };
 
-/** The registry's "latest" version of a package, or null. */
-async function latestVersion(name, dir, reg) {
-  const r = await runAsync('npm', ['view', `${name}@latest`, 'version', ...reg], { cwd: dir, timeoutMs: 30000 });
-  const v = r.status === 0 ? r.stdout.trim().split('\n').pop().replace(/'/g, '') : '';
-  return /^\d+\.\d+\.\d+/.test(v) ? v : null;
+/** The registry's "latest" version and every published version of a package ({ latest: null, versions: [] } on errors). */
+async function registryVersions(name, dir, reg) {
+  const r = await runAsync('npm', ['view', name, 'dist-tags.latest', 'versions', '--json', ...reg], { cwd: dir, timeoutMs: 30000 });
+  try {
+    const d = JSON.parse(r.stdout);
+    const versions = [].concat(d.versions ?? []).filter((v) => parse(v) && !parse(v).pre.length);
+    const latest = d['dist-tags.latest'] ?? null;
+    return { latest: typeof latest === 'string' ? latest : null, versions };
+  } catch {
+    return { latest: null, versions: [] };
+  }
+}
+
+// Audits per package when looking for a safe version (each takes a few seconds).
+const MAX_AUDITS = 7;
+
+/**
+ * The version of a package the command adds that has none of its own advisories and no
+ * high/critical ones in its dependencies: { version, latest, all, verified }, { lookupFailed }
+ * when the published versions couldn't be listed, or null when there is none.
+ *
+ * npm audit's own `fixAvailable` can't be trusted for this: for axios@0.21.1 it names 0.21.4,
+ * which still has high advisories (they reach up to 0.31.1). So the candidates come from the
+ * advisory ranges and the published versions (never past "latest"), and a version is only
+ * called a fix after a real audit of its tree.
+ */
+async function safeVersion(name, from, own, dir, lockDir, pm, reg, npmFix) {
+  const { latest, versions } = await registryVersions(name, dir, reg);
+  if (!versions.length) return { lookupFailed: true };
+  const newer = versions
+    .filter((v) => (!from || compare(v, from) > 0) && (!latest || compare(v, latest) <= 0))
+    .sort(compare);
+  const outside = (list) => {
+    const ranges = list.map((a) => a.range).filter(Boolean);
+    return newer.filter((v) => !ranges.some((r) => satisfies(v, r)));
+  };
+  // Clear of every advisory if a version is; otherwise clear of the high/critical ones (lower ones may have no fix yet).
+  let all = true;
+  let candidates = outside(own);
+  if (own.length && !candidates.length) {
+    all = false;
+    candidates = outside(own.filter((a) => BLOCKING.has(a.severity)));
+  }
+  // Without advisories of its own the problem is in its dependencies: try npm's pick and the latest.
+  if (!own.length) candidates = [...new Set([npmFix?.version, latest].filter((v) => v && candidates.includes(v)))];
+  if (!candidates.length) return null;
+
+  // Audits a version's whole tree: true (clean), false, or null (the audit didn't work).
+  let audits = 0;
+  const clean = async (version) => {
+    audits++;
+    const res = await resolveNew(dir, lockDir, pm, [{ name, spec: version }]);
+    if (res.error || res.auditError) return null;
+    const blocking = [...res.advisories.values()].flat().some((a) => BLOCKING.has(a.severity));
+    return !blocking && (!all || !(res.advisories.get(name) ?? []).length);
+  };
+  const unverified = (version) => ({ version, latest, all, verified: false });
+
+  // Usually the lowest candidate is fine. When it isn't (an advisory that the original version's
+  // audit didn't list, or vulnerable dependencies), newer releases of the same major are the next
+  // best: if the newest one is clean, binary-search down to the lowest clean one (releases get
+  // fixed and stay fixed, near enough); if not, fall back to the latest version.
+  const first = await clean(candidates[0]);
+  if (first === null) return unverified(candidates[0]);
+  if (first) return { version: candidates[0], latest, all, verified: true };
+  const sameMajor = candidates.filter((v) => parse(v).major === parse(candidates[0]).major);
+  let hi = sameMajor.length - 1;
+  const top = hi > 0 ? await clean(sameMajor[hi]) : false;
+  if (top === null) return unverified(sameMajor[hi]);
+  if (top) {
+    let lo = 1;
+    while (lo < hi && audits < MAX_AUDITS) {
+      const mid = Math.floor((lo + hi) / 2);
+      const ok = await clean(sameMajor[mid]);
+      if (ok === null) break;
+      if (ok) hi = mid; else lo = mid + 1;
+    }
+    return { version: sameMajor[hi], latest, all, verified: true };
+  }
+  const last = candidates[candidates.length - 1];
+  if (parse(last).major === parse(candidates[0]).major) return null;
+  const ok = await clean(last);
+  return ok === null ? unverified(last) : ok ? { version: last, latest, all, verified: true } : null;
 }
 
 /**
- * For each package the command adds that has high/critical problems: the version npm audit says
- * fixes them (and whether that is the latest), or that there is none. When every one has a fix,
- * also the same command with those versions, ready to paste.
+ * For each package the command adds that has high/critical problems: a version without them
+ * (and whether that is the latest), or that there is none. When every one has a fix, also the
+ * same command with those versions, ready to paste.
  */
-async function recommend(pm, args, dir, res) {
+async function recommend(pm, args, dir, lockDir, res) {
   if (!res.direct?.size) return;
-  const items = await Promise.all([...res.direct].map(async ([name, fix]) => {
-    const latest = fix ? await latestVersion(name, dir, res.reg) : null;
-    return { name, fix, latest, from: res.versions?.[name] };
+  const items = await Promise.all([...res.direct].map(async ([name, npmFix]) => {
+    const from = res.versions?.[name];
+    const fix = await safeVersion(name, from, res.advisories.get(name) ?? [], dir, lockDir, pm, res.reg, npmFix);
+    return { name, fix, from };
   }));
-  const width = Math.max(...items.map((i) => (i.fix ? `${i.name}@${i.fix.version}` : i.name).length));
+  const width = Math.max(...items.map((i) => (i.fix?.version ? `${i.name}@${i.fix.version}` : i.name).length));
   say(`  ${c.bold('Recommended:')}`);
-  for (const { name, fix, latest, from } of items) {
-    if (!fix) {
-      say(`    ${name.padEnd(width)}  ${c.yellow('no fixed version published')}${c.gray('; consider another package')}`);
+  for (const { name, fix, from } of items) {
+    if (!fix || fix.lookupFailed) {
+      say(`    ${name.padEnd(width)}  ${fix ? c.gray('could not list its published versions to find a fixed one')
+        : `${c.yellow('no fixed version published')}${c.gray('; consider another package')}`}`);
       continue;
     }
-    const bits = [fix.version === latest ? 'latest' : null, 'fixes these advisories',
-      fix.isSemVerMajor ? `major update from ${from ?? 'the requested version'}, check its changelog` : null].filter(Boolean);
+    const bits = [fix.version === fix.latest ? 'latest' : null,
+      fix.all ? 'fixes these advisories' : 'fixes the high/critical advisories',
+      fix.verified ? null : 'could not re-check it with npm audit',
+      from && isBreaking(from, fix.version) ? `major update from ${from}, check its changelog` : null].filter(Boolean);
     say(`    ${c.green(`${name}@${fix.version}`.padEnd(width))}  ${c.gray(bits.join(', '))}`);
   }
-  if (items.every((i) => i.fix)) {
+  if (items.every((i) => i.fix?.version)) {
     const fixes = new Map(items.map((i) => [i.name, i.fix.version]));
     const safe = args.map((a) => {
       const s = parseSpec(a);
@@ -345,7 +428,7 @@ async function check(pm, args, cmd) {
   ].filter(Boolean);
   for (const h of hints) say(c.gray(`  ${h}`));
   if (!problems.length) return true;
-  await recommend(pm, args, dir, res);
+  await recommend(pm, args, dir, lockDir, res);
 
   if (!process.stdin.isTTY) {
     say(c.yellow(`${tag}: not a terminal, so not asking; installing anyway`));
