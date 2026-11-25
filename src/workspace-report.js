@@ -204,7 +204,7 @@ function mapSvg(result, d) {
   };
   const nodes = [...pos].map(([rel, { x, y }]) => {
     const n = info(rel);
-    return `<g class="node sev-${n.w}" transform="translate(${x},${y})"><title>${esc(n.tip)}</title><rect width="${W}" height="${H}" rx="8"/><text x="${W / 2}" y="21" class="n">${esc(n.label)}</text><text x="${W / 2}" y="39" class="s">${esc(n.sub)}</text></g>`;
+    return `<a href="#p-${esc(rel)}" class="node-link"><g class="node sev-${n.w}" transform="translate(${x},${y})"><title>${esc(n.tip)}</title><rect width="${W}" height="${H}" rx="8"/><text x="${W / 2}" y="21" class="n">${esc(n.label)}</text><text x="${W / 2}" y="39" class="s">${esc(n.sub)}</text></g></a>`;
   }).join('');
   const looseRow = loose.length ? `<div class="loose"><div class="loose-h">Not linked to the others</div><div class="loose-row">${loose.map((rel) => {
     const n = info(rel);
@@ -238,10 +238,10 @@ export function renderWorkspaceHtml(result) {
 ${mapSvg(result, d)}
 ${versionNotes ? `<div class="note"><b>Different versions in use.</b> A fix released in one of these reaches only the projects that move to it.<ul>${versionNotes}</ul></div>` : ''}
 ${differLibs.length ? `<p class="muted">The folder version of ${differLibs.map((r) => `<code>${esc(r)}</code>`).join(', ')} differs from what the others install (old checkout, or the version is bumped at release). Its own scan checks the folder's lockfile; what the apps install is checked in their own scans.</p>` : ''}
-${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them, then bump them where they're used.</p><ol class="order">${d.order.map((l) => `<li>${l.map((r) => `<code>${esc(r)}</code>`).join(' ')}</li>`).join('')}</ol>` : ''}`
+${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them, then bump them where they're used.</p><ol class="order">${d.order.map((l) => `<li>${l.map((r) => `<a href="#p-${esc(r)}"><code>${esc(r)}</code></a>`).join(' ')}</li>`).join('')}</ol>` : ''}`
     : '<div class="empty-state">None of the picked projects depends on another one.</div>';
 
-  const sharedCards = d.shared.map((e, i) => {
+  const sharedCards = d.shared.map((e) => {
     const badge = e.prodFirst ? '<span class="tri prod-first">prod first</span>' : e.prod ? '' : '<span class="tri">dev only</span>';
     const rows = e.projects.map((x) => `<tr><td><b>${esc(x.rel)}</b>${x.through.length ? ` <span class="muted">(via ${esc(x.through.join(', '))})</span>` : ''}</td><td>${x.prod ? 'yes' : '<span class="muted">dev only</span>'}</td><td>${x.advisories}</td><td>${x.fixes.map(esc).join('<br>')}</td></tr>`).join('');
     const advs = e.advisories.map((a) => {
@@ -249,7 +249,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const title = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>` : esc(a.title);
       return `<li>${sevBadge(a.severity)} ${title} <span class="muted">${esc([a.ghsa, `${a.projects.length} project${a.projects.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></li>`;
     }).join('');
-    return `<details class="finding sev-${esc(e.severity)}" data-tier="${e.prodFirst ? 0 : e.prod ? 1 : 2}"${i < 3 ? ' open' : ''}><summary><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span><span class="title">${esc(e.package)}: ${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'}</span>${badge}<span class="meta">${esc(countBySeverity(e.advisories))} · ${e.projects.length} projects</span></summary>
+    return `<details class="finding sev-${esc(e.severity)}" data-tier="${e.prodFirst ? 0 : e.prod ? 1 : 2}"><summary><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span><span class="title">${esc(e.package)}: ${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'}</span>${badge}<span class="meta">${esc(countBySeverity(e.advisories))} · ${e.projects.length} projects</span></summary>
 <div class="advs"><div class="scroll"><table><thead><tr><th>Project</th><th>Production</th><th>Advisories</th><th>Fix there</th></tr></thead><tbody>${rows}</tbody></table></div>
 <div class="advs-h" style="margin-top:12px">Advisories</div><ul class="advlist">${advs}</ul></div></details>`;
   }).join('\n');
@@ -313,6 +313,11 @@ td a{color:var(--accent)}.scroll{overflow-x:auto}
 .step{display:inline-grid;place-items:center;min-width:24px;height:24px;padding:0 6px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:12.5px;font-weight:700;align-self:center}
 .map .node rect{fill:var(--panel);stroke:var(--c,var(--border));stroke-width:2}
 .map .node.sev-none rect{stroke:var(--ok)}
+.map .node-link{cursor:pointer}.map .node-link:hover rect,.map .node-link:focus-visible rect{fill:var(--panel-2);stroke-width:3}
+.map .node-link:focus{outline:none}
+.proj{scroll-margin-top:16px}.proj.flash{animation:flash 1.2s ease-out}
+@keyframes flash{from{box-shadow:0 0 0 3px var(--accent)}to{box-shadow:0 0 0 3px transparent}}
+@media (prefers-reduced-motion:reduce){.proj.flash{animation:none}}
 .map text{fill:var(--text);text-anchor:middle;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 .map text.n{font-weight:600}.map text.s{fill:var(--muted);font-size:12px}.map text.cap{text-anchor:start;fill:var(--muted);font-size:12px}
 .map .edge{fill:none;stroke:var(--muted);stroke-width:1.5}.map .edge.odd{stroke:var(--medium);stroke-dasharray:5 4}.map .arrow{fill:var(--muted)}
@@ -364,6 +369,27 @@ ${perProject}
 ${d.shared.length ? `<p class="muted">${d.shared.reduce((n, e) => n + e.advisories.length, 0)} advisories in ${d.shared.length} packages, grouped per package like in each project. The fix can differ per project: it depends on what installs the package there.</p>${sharedCards}` : '<div class="empty-state">Every vulnerable package was found in one project only.</div>'}
 
 <script>
+// Clicking a project in the map (or the fix order) opens it in Findings per project and
+// jumps there; only one project is open at a time.
+(function(){
+  var projs=[].slice.call(document.querySelectorAll('details.proj'));
+  projs.forEach(function(p){p.addEventListener('toggle',function(){
+    if(p.open)projs.forEach(function(o){if(o!==p&&o.open)o.open=false;});
+  });});
+  function show(id){
+    var p=document.getElementById(id);if(!p||!p.classList.contains('proj'))return false;
+    projs.forEach(function(o){if(o!==p)o.open=false;});p.open=true;p.scrollIntoView({block:'start'});
+    p.classList.remove('flash');void p.offsetWidth;p.classList.add('flash');
+    var s=p.querySelector('summary');if(s)s.focus({preventScroll:true});
+    return true;
+  }
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a[href^="#p-"]');if(!a)return;
+    var id=decodeURIComponent(a.getAttribute('href').slice(1));
+    if(show(id)){e.preventDefault();history.replaceState(null,'','#'+id);}
+  });
+  if(location.hash.indexOf('#p-')===0)show(decodeURIComponent(location.hash.slice(1)));
+})();
 (function(){
   var scope=document.getElementById('scope');if(!scope)return;
   var items=[].slice.call(document.querySelectorAll('[data-tier]'));
