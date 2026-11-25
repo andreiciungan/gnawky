@@ -11,7 +11,7 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 
 It can also stop risky packages before they reach your project: a [check before `npm install <pkg>` / `yarn add`](#checking-packages-before-you-install-them), pasted commands included, a [pre-commit check](#pre-commit-dependency-check) that blocks commits adding vulnerable dependencies, and a [pre-push warning](#pre-push-production-warning) about critical/high advisories that ship to production.
 
-**New to Gnawky?** [gnawky.dev](https://gnawky.dev) shows it in action, and the [presentation](https://gnawky.dev/presentation/) walks through what it does, how to use it and why.
+**New to Gnawky?** [gnawky.dev](https://gnawky.dev) shows it in action, the [presentation](https://gnawky.dev/presentation/) walks through what it does, how to use it and why, and the [docs](https://gnawky.dev/docs/) explain every feature in detail.
 
 ## What it checks
 
