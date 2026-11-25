@@ -249,6 +249,13 @@ const sevChips = (findings) => SEVERITY_ORDER
   .map((s) => [s, findings.filter((f) => f.severity === s).length])
   .filter(([, n]) => n)
   .map(([s, n]) => `<span class="chip sev-${s}">${n} ${s}</span>`).join('');
+/** The item's title with the package name first and larger: "next" + "7 advisories". */
+function itemTitle(g) {
+  const title = groupTitle(g);
+  const pkg = g.package ?? g.lead.package;
+  if (pkg && title.startsWith(`${pkg}: `)) return `<b class="pkg">${esc(pkg)}</b><span>${esc(title.slice(pkg.length + 2))}</span>`;
+  return `<b class="pkg">${esc(title)}</b>`;
+}
 const sevBadge = (s) => `<span class="sev sev-${esc(s)}">${esc(s)}</span>`;
 
 export function renderWorkspaceHtml(result) {
@@ -309,7 +316,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const badge = tier === 0 ? ' <span class="tri prod-first">prod first</span>' : tier === 2 ? ' <span class="tri">dev only</span>' : '';
       const t = groupVerdict(g, p);
       const why = t?.reason ? `<div class="take take-sm take-${esc(t.verdict)}"><div class="take-h">${SPARK}<b>Claude</b></div><p>${esc(t.reason)}</p></div>` : '';
-      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}${isGroup(g) ? `<div class="sevchips">${sevChips(g.findings)}</div>` : ''}<ul class="fixes">${fixes.map((x) => `<li>${fixBadge(x.fix?.type)}<span>${esc(x.fix?.detail)}${fixes.length > 1 ? ` <span class="muted">(${plural(x.findings.length, 'advisory', 'advisories')})</span>` : ''}</span></li>`).join('')}</ul>${why}</li>`;
+      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}"><div class="item-t">${itemTitle(g)}</div><div class="item-meta">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''}${isGroup(g) ? sevChips(g.findings) : ''}${ids ? `<span class="muted">${esc(ids)}</span>` : ''}${via.length ? `<span class="muted">via ${esc(via.join(', '))}</span>` : ''}</div><ul class="fixes">${fixes.map((x) => `<li>${fixBadge(x.fix?.type)}<span>${esc(x.fix?.detail)}${fixes.length > 1 ? ` <span class="muted">(${plural(x.findings.length, 'advisory', 'advisories')})</span>` : ''}</span></li>`).join('')}</ul>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
     return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${countChips(p)}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
@@ -358,7 +365,10 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .proj .cnt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;font-size:13px}
 .chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
 .chip-none{--c:var(--ok)}
-.sevchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.item-t{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;font-size:15px}
+.item-t .pkg{font-size:17px;font-weight:700;letter-spacing:-.005em}.item-t span{color:var(--muted)}
+.item-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 6px;margin-top:8px;font-size:13px}
+.proj li>.item-meta>.sev,.proj li>.item-meta>.tri{margin:0}
 .proj .fixes{list-style:none;margin:10px 0 0;padding:4px 14px;background:var(--panel-2);border:1px solid var(--border);border-radius:10px;font-size:14px;line-height:1.55}
 .proj .fixes li{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-top:1px dashed var(--border)}.proj .fixes li:first-child{border-top:0}
 .fixes .fix{flex:none;margin:0}
@@ -373,7 +383,6 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .fixline{color:var(--muted);font-size:13px;margin-top:2px}
 .sev-none{--c:var(--ok)}.pf{color:var(--critical)}
 .proj li.fp{opacity:.7}
-.proj li>.sev,.proj li>.tri{margin-right:4px}
 .take-sm{margin:8px 0 2px;padding:8px 12px 10px}.take-sm p{font-size:14.5px;margin-top:4px}
 .proj{box-shadow:var(--shadow);border-radius:12px}
 [hidden]{display:none!important}
