@@ -159,6 +159,7 @@ export async function scanNextBundledReact(dir, { cacheDir } = {}) {
         url: adv.html_url ?? null,
         fix: {
           type: 'manual',
+          disclosed: day(disclosed),
           detail: `Upgrade next to a release from after ${day(disclosed)} that includes the fix (see the Next.js releases `
             + 'or a Next.js advisory for this issue). Upgrading react or react-dom alone does not help: '
             + 'the App Router uses the copy bundled in next.',

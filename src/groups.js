@@ -1,5 +1,5 @@
 import { rank, SEVERITY_ORDER } from './finding.js';
-import { isDependencyFinding } from './pm.js';
+import { isDependencyFinding, NEXT_REACT_TOOL } from './pm.js';
 import { isAutoFixable } from './fix.js';
 import { highestNeeds, needsText } from './coverage.js';
 
@@ -65,13 +65,30 @@ export function severityCounts(findings) {
  * The fixes of a group, each with the findings it covers: auto-fixable ones first,
  * then manual ones. Most groups have a single fix.
  */
+const BUNDLED_DATE = /release from after (\d{4}-\d{2}-\d{2})/;
+
 export function groupFixes(g) {
   const fixes = new Map();
   for (const f of g.findings) {
     // Advisories the same upgrade leaves open share one line, with the highest version they need.
-    const key = f.fix?.stillVulnerable ? `still|${f.fix.package}|${f.fix.after}` : `${f.fix?.type}|${f.fix?.detail}`;
+    // The React that Next.js bundles: one line for all of them (a release after the latest date covers the rest).
+    const bundled = f.tool === NEXT_REACT_TOOL && f.fix?.type === 'manual';
+    const key = bundled ? 'bundled-react' : f.fix?.stillVulnerable ? `still|${f.fix.package}|${f.fix.after}` : `${f.fix?.type}|${f.fix?.detail}`;
     if (!fixes.has(key)) fixes.set(key, { fix: f.fix, auto: isAutoFixable(f), findings: [] });
     fixes.get(key).findings.push(f);
+  }
+  const react = fixes.get('bundled-react');
+  if (react?.findings.length > 1) {
+    const dates = react.findings.map((f) => f.fix.disclosed ?? BUNDLED_DATE.exec(f.fix.detail ?? '')?.[1]).filter(Boolean).sort();
+    if (dates.length) {
+      react.fix = {
+        ...react.fix,
+        disclosed: dates.at(-1),
+        detail: `Upgrade next to a release from after ${dates.at(-1)} that includes the fixes for these ${react.findings.length} advisories in the React it bundles `
+          + '(see the Next.js releases or the Next.js advisories). Upgrading react or react-dom alone does not help: '
+          + 'the App Router uses the copy bundled in next.',
+      };
+    }
   }
   for (const x of fixes.values()) {
     if (!x.fix?.stillVulnerable || x.findings.length < 2) continue;

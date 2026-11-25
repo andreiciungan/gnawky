@@ -53,7 +53,7 @@ const triageLine = (projects) => {
     ? `Claude triage: ${n.real} real, ${n.falsePositive} likely false positive${n.falsePositive === 1 ? '' : 's'}, ${n.unsure} unsure, ${n.none} not triaged.`
     : null;
 };
-import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges, SPARK } from './html-report.js';
+import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges, SPARK, fixBadge } from './html-report.js';
 import { prodFirstCount, shipsToProd, priorityTier } from './prod.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -244,6 +244,11 @@ ${looseRow}
 <div class="legend"><span><svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><path d="M0,5 H20" class="edge"/><path d="M18,1 L25,5 L18,9 z" class="arrow"/></svg>uses</span>${d.versions.length ? '<span><i class="dash"></i>different version than most</span>' : ''}<span class="legend-sep">Border: worst finding</span>${swatches}</div></div>`;
 }
 
+/** "4 critical", "18 high"… as colored chips. */
+const sevChips = (findings) => SEVERITY_ORDER
+  .map((s) => [s, findings.filter((f) => f.severity === s).length])
+  .filter(([, n]) => n)
+  .map(([s, n]) => `<span class="chip sev-${s}">${n} ${s}</span>`).join('');
 const sevBadge = (s) => `<span class="sev sev-${esc(s)}">${esc(s)}</span>`;
 
 export function renderWorkspaceHtml(result) {
@@ -304,7 +309,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const badge = tier === 0 ? ' <span class="tri prod-first">prod first</span>' : tier === 2 ? ' <span class="tri">dev only</span>' : '';
       const t = groupVerdict(g, p);
       const why = t?.reason ? `<div class="take take-sm take-${esc(t.verdict)}"><div class="take-h">${SPARK}<b>Claude</b></div><p>${esc(t.reason)}</p></div>` : '';
-      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div>${why}</li>`;
+      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}${isGroup(g) ? `<div class="sevchips">${sevChips(g.findings)}</div>` : ''}<ul class="fixes">${fixes.map((x) => `<li>${fixBadge(x.fix?.type)}<span>${esc(x.fix?.detail)}${fixes.length > 1 ? ` <span class="muted">(${plural(x.findings.length, 'advisory', 'advisories')})</span>` : ''}</span></li>`).join('')}</ul>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
     return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${countChips(p)}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
@@ -353,12 +358,16 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .proj .cnt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;font-size:13px}
 .chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
 .chip-none{--c:var(--ok)}
+.sevchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.proj .fixes{list-style:none;margin:10px 0 0;padding:4px 14px;background:var(--panel-2);border:1px solid var(--border);border-radius:10px;font-size:14px;line-height:1.55}
+.proj .fixes li{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-top:1px dashed var(--border)}.proj .fixes li:first-child{border-top:0}
+.fixes .fix{flex:none;margin:0}
 @media (max-width:640px){.proj summary{padding:10px 12px}.proj .cnt{margin-left:0;flex-basis:100%;justify-content:flex-start}}
 .chip.ai-now{--c:var(--critical);background:var(--critical);color:#fff}
 .ai-soon{--c:var(--medium)}.chip-real{--c:var(--high)}.chip-unsure{--c:var(--medium)}.chip-muted{--c:var(--muted)}
 .proj .cnt .prod-first{background:var(--critical);border-color:var(--critical);color:#fff}
 .proj ul{list-style:none;margin:0;padding:4px 14px 12px;border-top:1px solid var(--border)}
-.proj li{padding:8px 0;border-top:1px solid var(--border)}.proj li:first-child{border-top:0}
+.proj li{padding:14px 0;border-top:1px solid var(--border)}.proj li:first-child{border-top:0}
 .note-line{color:var(--medium)}
 .advlist{list-style:none;margin:0;padding:0}.advlist li{padding:4px 0}
 .fixline{color:var(--muted);font-size:13px;margin-top:2px}

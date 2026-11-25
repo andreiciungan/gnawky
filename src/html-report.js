@@ -42,7 +42,7 @@ const FIX_LABELS = {
   manual: ['manual', 'manual'],
 };
 
-function fixBadge(type) {
+export function fixBadge(type) {
   const [kind, label] = FIX_LABELS[type] ?? ['manual', type ?? 'manual'];
   return `<span class="fix fix-${kind}">${esc(label)}</span>`;
 }
