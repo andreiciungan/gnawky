@@ -53,7 +53,7 @@ const triageLine = (projects) => {
     ? `Claude triage: ${n.real} real, ${n.falsePositive} likely false positive${n.falsePositive === 1 ? '' : 's'}, ${n.unsure} unsure, ${n.none} not triaged.`
     : null;
 };
-import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges, SPARK, fixBadge } from './html-report.js';
+import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges, SPARK, sevChips, titleHtml, fixesHtml } from './html-report.js';
 import { prodFirstCount, shipsToProd, priorityTier } from './prod.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -244,18 +244,7 @@ ${looseRow}
 <div class="legend"><span><svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><path d="M0,5 H20" class="edge"/><path d="M18,1 L25,5 L18,9 z" class="arrow"/></svg>uses</span>${d.versions.length ? '<span><i class="dash"></i>different version than most</span>' : ''}<span class="legend-sep">Border: worst finding</span>${swatches}</div></div>`;
 }
 
-/** "4 critical", "18 high"… as colored chips. */
-const sevChips = (findings) => SEVERITY_ORDER
-  .map((s) => [s, findings.filter((f) => f.severity === s).length])
-  .filter(([, n]) => n)
-  .map(([s, n]) => `<span class="chip sev-${s}">${n} ${s}</span>`).join('');
-/** The item's title with the package name first and larger: "next" + "7 advisories". */
-function itemTitle(g) {
-  const title = groupTitle(g);
-  const pkg = g.package ?? g.lead.package;
-  if (pkg && title.startsWith(`${pkg}: `)) return `<b class="pkg">${esc(pkg)}</b><span>${esc(title.slice(pkg.length + 2))}</span>`;
-  return `<b class="pkg">${esc(title)}</b>`;
-}
+const itemTitle = (g) => titleHtml(g.package ?? g.lead.package, groupTitle(g));
 const sevBadge = (s) => `<span class="sev sev-${esc(s)}">${esc(s)}</span>`;
 
 export function renderWorkspaceHtml(result) {
@@ -286,7 +275,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const title = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>` : esc(a.title);
       return `<li>${sevBadge(a.severity)} ${title} <span class="muted">${esc([a.ghsa, `${a.projects.length} project${a.projects.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></li>`;
     }).join('');
-    return `<details class="finding sev-${esc(e.severity)}" data-tier="${e.prodFirst ? 0 : e.prod ? 1 : 2}"><summary><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span><span class="title">${esc(e.package)}: ${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'}</span>${badge}<span class="meta">${esc(countBySeverity(e.advisories))} · ${e.projects.length} projects</span></summary>
+    return `<details class="finding sev-${esc(e.severity)}" data-tier="${e.prodFirst ? 0 : e.prod ? 1 : 2}"><summary><div class="item-t"><b class="pkg">${esc(e.package)}</b><span>${e.advisories.length} advisor${e.advisories.length === 1 ? 'y' : 'ies'} in ${e.projects.length} projects</span></div><div class="item-meta"><span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span>${badge}${sevChips(e.advisories)}</div></summary>
 <div class="advs"><div class="scroll"><table><thead><tr><th>Project</th><th>Production</th><th>Advisories</th><th>Fix there</th></tr></thead><tbody>${rows}</tbody></table></div>
 <div class="advs-h" style="margin-top:12px">Advisories</div><ul class="advlist">${advs}</ul></div></details>`;
   }).join('\n');
@@ -316,7 +305,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const badge = tier === 0 ? ' <span class="tri prod-first">prod first</span>' : tier === 2 ? ' <span class="tri">dev only</span>' : '';
       const t = groupVerdict(g, p);
       const why = t?.reason ? `<div class="take take-sm take-${esc(t.verdict)}"><div class="take-h">${SPARK}<b>Claude</b></div><p>${esc(t.reason)}</p></div>` : '';
-      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}"><div class="item-t">${itemTitle(g)}</div><div class="item-meta">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''}${isGroup(g) ? sevChips(g.findings) : ''}${ids ? `<span class="muted">${esc(ids)}</span>` : ''}${via.length ? `<span class="muted">via ${esc(via.join(', '))}</span>` : ''}</div><ul class="fixes">${fixes.map((x) => `<li>${fixBadge(x.fix?.type)}<span>${esc(x.fix?.detail)}${fixes.length > 1 ? ` <span class="muted">(${plural(x.findings.length, 'advisory', 'advisories')})</span>` : ''}</span></li>`).join('')}</ul>${why}</li>`;
+      return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}"><div class="item-t">${itemTitle(g)}</div><div class="item-meta">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''}${isGroup(g) ? sevChips(g.findings) : ''}${ids ? `<span class="muted">${esc(ids)}</span>` : ''}${via.length ? `<span class="muted">via ${esc(via.join(', '))}</span>` : ''}</div>${fixesHtml(fixes)}${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
     return `<details class="proj" id="p-${esc(p.rel)}"><summary><span class="step" title="Fix order">${step + 1}</span><b>${esc(p.rel)}</b> <span class="muted">${esc([p.name !== p.rel ? p.name : '', p.pm ?? 'no lockfile'].filter(Boolean).join(' · '))}</span><span class="cnt">${countChips(p)}</span></summary><ul>${skipped}${items}${none}</ul></details>`;
@@ -363,15 +352,8 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .proj{background:var(--panel);border:1px solid var(--border);border-radius:8px;margin-bottom:8px}
 .proj summary{cursor:pointer;padding:10px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .proj .cnt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;font-size:13px}
-.chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
-.chip-none{--c:var(--ok)}
-.item-t{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;font-size:15px}
-.item-t .pkg{font-size:17px;font-weight:700;letter-spacing:-.005em}.item-t span{color:var(--muted)}
-.item-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 6px;margin-top:8px;font-size:13px}
-.proj li>.item-meta>.sev,.proj li>.item-meta>.tri{margin:0}
 .proj .fixes{list-style:none;margin:10px 0 0;padding:4px 14px;background:var(--panel-2);border:1px solid var(--border);border-radius:10px;font-size:14px;line-height:1.55}
 .proj .fixes li{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-top:1px dashed var(--border)}.proj .fixes li:first-child{border-top:0}
-.fixes .fix{flex:none;margin:0}
 @media (max-width:640px){.proj summary{padding:10px 12px}.proj .cnt{margin-left:0;flex-basis:100%;justify-content:flex-start}}
 .chip.ai-now{--c:var(--critical);background:var(--critical);color:#fff}
 .ai-soon{--c:var(--medium)}.chip-real{--c:var(--high)}.chip-unsure{--c:var(--medium)}.chip-muted{--c:var(--muted)}

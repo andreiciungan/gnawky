@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { SEVERITY_ORDER } from './finding.js';
 import { VERDICTS, URGENCIES, reviewGroups } from './triage.js';
 import { scopeText, groupScopeText, shipsToProd, isProdFirst, prodFirstCount, priorityTier } from './prod.js';
-import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, severityCounts, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
+import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, advisoryTitle, idsOf, alsoFixes, triageByPackage } from './groups.js';
 
 // Self-contained HTML report: no external CSS, JS, fonts or images, so it opens
 // offline and viewing it never sends anything anywhere. Every value comes from
@@ -72,7 +72,7 @@ function findingRows(f, t, { inGroup = false } = {}) {
     inGroup && idsOf(f).length && ['IDs', idsOf(f).map((x) => `<code>${esc(x)}</code>`).join(' ')],
     f.cwe?.length && ['CWE', f.cwe.map(esc).join(', ')],
     f.description && ['Details', esc(f.description)],
-    ['Suggested fix', `${fixBadge(f.fix?.type)} ${esc(f.fix?.detail)}`],
+    inGroup && ['Suggested fix', `${fixBadge(f.fix?.type)} ${esc(f.fix?.detail)}`],
     f.audit && ['Full audit', `<span class="tri tri-real">verified</span>${f.audit.confidence ? ` ${esc(f.audit.confidence)} confidence` : ''}${f.audit.likelihood ? `, likelihood ${esc(f.audit.likelihood)}, impact ${esc(f.audit.impact)}` : ''}${f.audit.confidenceReason ? `. ${esc(f.audit.confidenceReason)}` : ''}`],
     f.audit?.attacker && ['Attacker', esc(f.audit.attacker)],
     f.audit?.conditions.length && ['Conditions', `<ul>${f.audit.conditions.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`],
@@ -108,12 +108,33 @@ function cardAttrs(sev, list, t, search, open) {
   return `class="finding sev-${esc(sev)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}" data-sev="${esc(sev)}" data-sevs="${esc(sevs)}" data-tools="${esc(tools)}" data-verdict="${t ? esc(t.verdict) : 'none'}" data-urgency="${t ? esc(t.urgency) : 'none'}" data-search="${esc(search)}"${open ? ' open' : ''}`;
 }
 
+/** "4 critical", "18 high"… as colored chips. */
+export const sevChips = (findings) => SEVERITY_ORDER
+  .map((s) => [s, findings.filter((f) => f.severity === s).length])
+  .filter(([, n]) => n)
+  .map(([s, n]) => `<span class="chip sev-${s}">${n} ${s}</span>`).join('');
+
+/** A title with the package name first and larger: "next" + "7 advisories". */
+export function titleHtml(pkg, title) {
+  if (pkg && title.startsWith(`${pkg}: `)) return `<b class="pkg">${esc(pkg)}</b><span>${esc(title.slice(pkg.length + 2))}</span>`;
+  return `<b class="pkg">${esc(title)}</b>`;
+}
+
+/** The fix lines of an item, each with its kind; how many advisories each covers when there are several. */
+export function fixesHtml(fixes) {
+  const many = fixes.length > 1;
+  return `<ul class="fixes">${fixes.map((x) => `<li>${fixBadge(x.fix?.type)}<span>${esc(x.fix?.detail)}${many ? ` <span class="muted">(${x.findings.length} ${x.findings.length === 1 ? 'advisory' : 'advisories'})</span>` : ''}</span></li>`).join('')}</ul>`;
+}
+
+const fixBox = (fixes) => `<div class="fixbox"><div class="fixbox-h">Suggested fix</div>${fixesHtml(fixes)}</div>`;
+
 function findingCard(f, i, triage) {
   const t = triage.entries[f.fingerprint];
   const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : null;
   return `<details ${cardAttrs(f.severity, [f], t, searchText(f, t), i < 3)}>
-<summary><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="title">${esc(f.title)}</span>${scopeBadge([f])}${t ? triageBadges(t) : ''}<span class="meta">${esc(f.tool)}${loc ? ` · ${esc(loc)}` : ''}</span></summary>
+<summary><div class="item-t">${titleHtml(f.package, f.title)}</div><div class="item-meta"><span class="sev sev-${esc(f.severity)}">${esc(f.severity)}</span>${scopeBadge([f])}${t ? triageBadges(t) : ''}<span class="meta">${esc(f.tool)}${loc ? ` · ${esc(loc)}` : ''}</span></div></summary>
 ${t ? takeBlock([{ package: null, t }], t) : ''}
+${fixBox([{ fix: f.fix, findings: [f] }])}
 ${dl(findingRows(f, t))}
 </details>`;
 }
@@ -143,15 +164,11 @@ function groupCard(g, i, triage) {
   const t = groupTriage(g, triage);
   const takes = triageByPackage(g, triage);
   const fixes = groupFixes(g);
-  const fixHtml = fixes.length === 1
-    ? `${fixBadge(fixes[0].fix?.type)} ${esc(fixes[0].fix?.detail)} <span class="muted">(all ${g.findings.length})</span>`
-    : `<ul>${fixes.map((x) => `<li>${fixBadge(x.fix?.type)} ${esc(x.fix?.detail)} <span class="muted">(${x.findings.length})</span></li>`).join('')}</ul>`;
   const rows = [
     ['Package', `<code>${esc(g.package)}</code>`],
     ['Production', scopeHtml(g.findings)],
     alsoFixes(g) && ['Also covers', `${esc(alsoFixes(g))} <span class="muted">(installed by ${esc(g.package)}; npm expects this upgrade to fix them, not checked)</span>`],
     ['Location', [...new Set(g.findings.map((f) => f.file).filter(Boolean))].map((x) => `<code>${esc(x)}</code>`).join(' ') || 'n/a'],
-    ['Suggested fix', fixHtml],
   ].filter((r) => r && r[1]);
   const mixed = new Set(g.findings.map(shipsToProd)).size > 1;
   const advisories = g.findings.map((f) => `<details class="adv sev-${esc(f.severity)}">
@@ -161,8 +178,9 @@ ${dl([...(mixed ? [['Production', scopeHtml([f])]] : []), ...findingRows(f, null
   const search = g.findings.map((f) => searchText(f, triage.entries[f.fingerprint])).join(' ');
   const tools = [...new Set(g.findings.map((f) => f.tool))].join(', ');
   return `<details ${cardAttrs(g.severity, g.findings, t, search, i < 3)}>
-<summary><span class="sev sev-${esc(g.severity)}">${esc(g.severity)}</span><span class="title">${esc(groupTitle(g))}</span>${scopeBadge(g.findings)}${t ? triageBadges(t) : ''}<span class="meta">${esc(severityCounts(g.findings))} · ${esc(tools)}</span></summary>
+<summary><div class="item-t">${titleHtml(g.package, groupTitle(g))}</div><div class="item-meta"><span class="sev sev-${esc(g.severity)}">${esc(g.severity)}</span>${scopeBadge(g.findings)}${t ? triageBadges(t) : ''}${sevChips(g.findings)}<span class="meta">${esc(tools)}</span></div></summary>
 ${takeBlock(takes, t ?? takes[0]?.t)}
+${fixBox(fixes)}
 ${dl(rows)}
 <div class="advs"><div class="advs-h">Advisories</div>${advisories}</div>
 </details>`;
@@ -197,13 +215,22 @@ ul.scanners li{padding:10px 16px;border-top:1px solid var(--border)}ul.scanners 
 .controls input,.controls select{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px 12px}
 .controls input{flex:1;min-width:200px}.controls input:focus,.controls select:focus{outline:2px solid var(--accent);outline-offset:0}
 .finding{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--c);border-radius:12px;margin-bottom:10px;box-shadow:var(--shadow);overflow:hidden}
-.finding>summary{cursor:pointer;padding:12px 44px 12px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;list-style:none;position:relative}
+.finding>summary{cursor:pointer;padding:14px 44px 14px 16px;display:block;list-style:none;position:relative}
 .finding>summary:hover{background:var(--panel-2)}
 .finding summary::-webkit-details-marker{display:none}
 .finding>summary::after{content:"";position:absolute;right:18px;top:19px;width:8px;height:8px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(45deg);transition:transform .15s}
 .finding[open]>summary::after{transform:rotate(-135deg);top:22px}
-.finding .title{font-weight:650;flex:1;min-width:200px}.finding .meta{color:var(--muted);font-size:13px;word-break:break-all;flex-basis:100%;order:9}
-.finding.fp>summary{opacity:.7}.finding.fp>summary .title{text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
+.finding>summary .meta{color:var(--muted);font-size:13px;word-break:break-all}
+.finding.fp>summary{opacity:.7}.finding.fp>summary .pkg{text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
+.chip{display:inline-flex;align-items:center;font-size:12px;font-weight:650;line-height:1.5;border-radius:999px;padding:1px 9px;white-space:nowrap;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border:1px solid color-mix(in srgb,var(--c) 40%,transparent)}
+.chip-none{--c:var(--ok)}
+.item-t{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;font-size:15px}
+.item-t .pkg{font-size:17px;font-weight:700;letter-spacing:-.005em}.item-t span{color:var(--muted)}
+.item-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px;font-size:13px}.item-meta .sev,.item-meta .tri{margin:0}
+.fixes{list-style:none;margin:0;padding:4px 14px;background:var(--panel-2);border:1px solid var(--border);border-radius:10px;font-size:14px;line-height:1.55}
+.fixes li{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-top:1px dashed var(--border)}.fixes li:first-child{border-top:0}
+.fixes .fix{flex:none;margin:0}
+.fixbox{margin:0 16px 14px}.fixbox-h{color:var(--muted);font-size:13px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;margin:0 0 6px}
 .sev{font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.06em;color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent);border:1px solid color-mix(in srgb,var(--c) 55%,transparent);border-radius:6px;padding:1px 7px}
 .finding dl{display:grid;grid-template-columns:130px 1fr;gap:6px 16px;margin:0;padding:6px 16px 16px;border-top:1px solid var(--border)}
 .finding dt{color:var(--muted);padding-top:8px;font-size:14px}.finding dd{margin:0;padding-top:8px;overflow-wrap:anywhere}
