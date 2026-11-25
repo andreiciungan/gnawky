@@ -33,6 +33,8 @@ Commands (run inside the project; all but scan use the last scan in .gnawky/):
   gnawky fix --keep | --undo     keep the fix branch (and save the fixed advisories) or throw it away
   gnawky pre-commit              check dependencies in the staged lockfile (used by the git hook);
                                  fails only on new high/critical findings (--min-severity to change)
+  gnawky pre-push [--json]       fresh audit: critical/high advisories that ship to production (used by
+                                 the git pre-push hook); only warns, always exits 0
 
 Workspace mode (a folder holding several projects; run it in that folder):
   gnawky                         in a folder without package.json: pick projects, see how they're linked, scan them all
@@ -86,6 +88,12 @@ async function main() {
     }
     const { preCommit } = await import('../src/precommit.js');
     process.exitCode = await preCommit({ minSeverity });
+    return;
+  }
+  // Run by the git pre-push hook Gnawky adds (Settings → pre-push warning). Never fails.
+  if (process.argv[2] === 'pre-push') {
+    const { prePush } = await import('../src/prepush.js');
+    process.exitCode = await prePush({ json: process.argv.includes('--json') });
     return;
   }
   const sub = process.argv[2];

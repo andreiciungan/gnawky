@@ -140,7 +140,8 @@ export async function scanNpmAudit(dir, { fixes = true } = {}) {
   } catch {
     return { error: `could not parse npm audit output: ${(r.stderr || String(r.error ?? '')).slice(0, 300)}` };
   }
-  if (data.error) return { error: data.error.summary ?? 'npm audit failed' };
+  // A network failure leaves summary empty and puts the reason in a top-level message.
+  if (data.error) return { error: data.error.summary || data.message || data.error.detail || 'npm audit failed' };
 
   const direct = directDeps(dir);
   const vulns = Object.entries(data.vulnerabilities ?? {});

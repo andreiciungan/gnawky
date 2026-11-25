@@ -1,6 +1,6 @@
 ---
 name: gnawky
-description: Gnawky, the security scanner for Node.js projects. Use whenever the user addresses or mentions Gnawky ("gnawky find security issues", "gnawky scan", "gnawky generate the report", "gnawky triage the findings", "gnawky what's wrong with next?", "gnawky ignore the axios ones", "gnawky fix next"), or asks to scan this project's dependencies, secrets or code for security issues, to show or open the Gnawky report, to triage or explain its findings, or to ignore findings. Not for a full manual code audit (that is the security-audit skill).
+description: Gnawky, the security scanner for Node.js projects. Use whenever the user addresses or mentions Gnawky ("gnawky find security issues", "gnawky scan", "gnawky generate the report", "gnawky triage the findings", "gnawky what's wrong with next?", "gnawky anything critical in production?", "gnawky ignore the axios ones", "gnawky fix next"), or asks which vulnerable packages ship to production, to scan this project's dependencies, secrets or code for security issues, to show or open the Gnawky report, to triage or explain its findings, or to ignore findings. Not for a full manual code audit (that is the security-audit skill).
 ---
 
 # Gnawky
@@ -23,6 +23,7 @@ Run each command on its own: no `cd`, variables, pipes, `head` or `&&` around it
 |---|---|
 | to find security issues / scan | `gnawky scan --json` (takes seconds to a few minutes; semgrep is the slow part) |
 | to see the findings of the last scan | `gnawky findings --json` |
+| a quick, current answer to "anything critical/high in production?" | `gnawky pre-push --json` (a fresh dependency audit only, a few seconds; see below) |
 | the report | `gnawky report` (add `--open` to open the HTML report in their browser) |
 | Claude triage | `gnawky triage --json [--severity …] [--sources …]`, then the same with `--yes` after they agree (see below) |
 | to ignore findings | `gnawky ignore <target>... --reason "…"` |
@@ -43,6 +44,15 @@ Summarize like this:
 4. Mention the reports: `reports.markdown` and `reports.html`.
 
 To check whether a code or secret finding is real, read the code yourself or use the `security-reviewer` agent.
+
+## Quick production check
+
+`gnawky pre-push --json` is what Gnawky's git pre-push hook runs, without pushing anything: a fresh npm/yarn audit of every project in the repository, keeping only critical and high advisories in packages that ship to production (dev-only packages and ignored findings are left out). It writes nothing but a cache file and doesn't touch the last scan's results or reports. Prefer it over `gnawky scan` when the user only asks about vulnerable production dependencies; it skips gitleaks and semgrep, so say it doesn't cover secrets or code.
+
+Its JSON has `projects[]`, each with `checked`, `error`, and `items[]`: `package` (the package to upgrade), `severity`, `advisories`, `vulnerablePackages` (when it differs from `package`, the upgrade fixes advisories in packages it installs), `fix` (one line, such as `upgrade express to 4.22.3` or `needs a release of axios after 0.31.1`), `via` and `ids`. Summarize:
+1. Per project: how many packages, or that there are none. If `checked` is false, say it wasn't checked and why. If `resultsFrom` is set, the audit failed and these are older results from that date: say newer advisories may be missing.
+2. Each item on one line: severity, package, advisory count, the fix, and how it ships (`via`).
+3. Offer `gnawky fix <package> --json` (the plan, see Fixes) for items whose fix is an upgrade, and explain items that need a release that doesn't exist yet.
 
 ## Triage
 

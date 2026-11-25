@@ -9,7 +9,7 @@
 
 Gnawky is a local security scanner for Node.js projects. It combines proven open-source scanners, writes one report, and lets you choose per finding: **fix**, **ignore (with a reason)**, or **skip**. It also ships as a Claude Code plugin that explains findings and proposes fixes.
 
-It can also stop risky packages before they reach your project: a [check before `npm install <pkg>` / `yarn add`](#checking-packages-before-you-install-them), pasted commands included, and a [pre-commit check](#pre-commit-dependency-check) that blocks commits adding vulnerable dependencies.
+It can also stop risky packages before they reach your project: a [check before `npm install <pkg>` / `yarn add`](#checking-packages-before-you-install-them), pasted commands included, a [pre-commit check](#pre-commit-dependency-check) that blocks commits adding vulnerable dependencies, and a [pre-push warning](#pre-push-production-warning) about critical/high advisories that ship to production.
 
 **New to Gnawky?** The [presentation](https://webdevs.ro/gnawky/) walks through what it does, how to use it and why.
 
@@ -61,7 +61,7 @@ The first time you start Gnawky in a project, a short setup runs:
 
 1. **Your project:** detects the stack (TypeScript, Express, React, Next.js, Docker, GitHub Actions, databases, auth libraries), checks for a lockfile and git, and warns if a `.env` file is not ignored by git. It only reads `package.json` and file names.
 2. **Network access:** choose **Online** (recommended: the dependency audit sends your dependency list to the npm registry, semgrep downloads its rulesets, and the AI tools are available) or **Offline** (nothing leaves this computer, but only gitleaks runs unless you add a local semgrep rules file, and the AI tools are off). Saved per project; change it any time in Settings. Starting with `gnawky --offline` pre-selects Offline.
-3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to. It also recommends the [package check](#checking-packages-before-you-install-them) and the [pre-commit check](#pre-commit-dependency-check) when they aren't on yet.
+3. **Recommended tools:** shows which scanners fit the project and which are missing, and installs them with Homebrew (or pipx for semgrep) if you choose to. It also recommends the [package check](#checking-packages-before-you-install-them), the [pre-commit check](#pre-commit-dependency-check) and the [pre-push warning](#pre-push-production-warning) when they aren't on yet.
 4. **First scan:** saves semgrep rules that match the stack (for example `p/expressjs`, `p/react`, `p/dockerfile`) and offers to run the first scan.
 
 You can run the setup again from Settings. After that you get an interactive menu (arrow keys + Enter, or number keys; `q`/Esc goes back):
@@ -251,6 +251,25 @@ Fix them (gnawky → Findings), ignore them with a reason in gnawky, or commit a
 - **Never blocks for its own problems**: in offline mode, without a network, if the audit fails, or for teammates who don't have gnawky installed, the commit goes through (with a note).
 - Run it by hand with `gnawky pre-commit` (`--min-severity critical` to block only critical findings).
 
+### Pre-push production warning
+
+The pre-commit check only looks at what a commit adds. The pre-push warning is a reminder of what is already there: turn it on in **Settings → Pre-push production warning** (setup recommends it too). Before every `git push`, Gnawky lists the packages with critical or high advisories that ship to production, old ones included, grouped by the package to upgrade:
+
+```
+  ! my-app: 2 package(s) with critical/high advisories ship to production (2s)
+    HIGH     axios    11 advisories: upgrade axios to 1.12.0  (direct dependency)
+    HIGH     express  6 advisories: upgrade express to 4.22.3  (direct dependency)
+
+gnawky: pushing anyway; this is a reminder, not a block.
+```
+
+- **It never blocks.** The push always goes through, also when the audit fails or the project is in offline mode.
+- **Production only**, worked out the same way as the production priority in Findings: a package counts when a `dependencies` entry brings it in. Dev-only packages (test runners, linters, build tools) are left out, and in Next.js projects devDependencies that aren't tooling count as production. Ignored findings are left out too.
+- **A fresh audit on every push**, so advisories published since your last scan show up too. It usually takes a few seconds. If the audit fails (no network, registry down), Gnawky shows the last results for the same dependencies instead, with their date and a note that newer advisories are missing.
+- **Every project in the repository**: each folder with a lockfile tracked by git is checked, so it works in monorepos too.
+- **Where it goes**: the same as the pre-commit check (`.husky/pre-push`, your `core.hooksPath`, or `.git/hooks/pre-push`; a snippet for lefthook). It reads nothing from the hook's input, so other pre-push tools like git-lfs keep working.
+- Run it by hand with `gnawky pre-push` (`--json` for scripts), or ask Claude with `/gnawky:prod`.
+
 ## Safety model
 
 - **The scan is read-only.** Nothing changes unless you choose a fix in the app and confirm the plan.
@@ -272,12 +291,14 @@ gnawky find any security issues
 gnawky generate the report
 gnawky triage the findings, high and critical only
 gnawky what's wrong with next?
+gnawky anything critical in production?
 gnawky ignore the lodash advisories, we only use it in build scripts
 gnawky fix next
 ```
 
 - `gnawky` skill: picks up requests that mention Gnawky and runs the matching command below, then explains the results in grouped items, with Claude's verdicts where there are any. Before a triage it shows what will be sent and asks you; ignores need your reason. For fixes it shows Gnawky's plan, suggests an order (or splitting a risky major upgrade into its own branch), asks whether to verify with your scripts, and applies it with `gnawky fix` only after you agree; you then choose keep or undo. Claude doesn't install packages or edit the lockfile itself. Claude picks skills by their description, so a request without "gnawky" in it may not use it; the slash commands always do.
 - `/gnawky:scan`, `/gnawky:report`, `/gnawky:triage`, `/gnawky:fix`: the same as slash commands
+- `/gnawky:prod`: the quick production check (`gnawky pre-push --json`, the same check as the [pre-push warning](#pre-push-production-warning)): a fresh audit listing the critical/high advisories that ship to production, in a few seconds, without a full scan
 - `security-reviewer` agent: read-only triage of true vs. false positives, drafts minimal fix diffs
 - `security-audit` skill (`gnawky:security-audit`): Cloudflare's multi-phase audit skill, bundled unmodified under its MIT license. See `skills/security-audit/VENDORED.md` for the source commit and how to update it. Gnawky loads it with `--plugin-dir`, so the menu item works without installing the plugin.
 

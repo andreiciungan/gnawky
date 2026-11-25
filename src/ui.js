@@ -41,10 +41,10 @@ export function fmtDuration(seconds) {
 export function ticker(label, stream = process.stdout) {
   const started = Date.now();
   const elapsed = () => fmtDuration((Date.now() - started) / 1000);
-  const icon = { ok: c.green('✔'), skip: c.yellow('–'), fail: c.red('✖') };
+  const icon = { ok: c.green('✔'), skip: c.yellow('–'), warn: c.yellow('!'), fail: c.red('✖') };
   if (!stream.isTTY) {
     stream.write(`  ${label}…\n`);
-    return (text, kind = 'ok') => stream.write(`  ${kind === 'ok' ? '✔' : kind === 'skip' ? '–' : '✖'} ${text} (${elapsed()})\n`);
+    return (text, kind = 'ok') => stream.write(`  ${{ ok: '✔', skip: '–', warn: '!' }[kind] ?? '✖'} ${text} (${elapsed()})\n`);
   }
   const frames = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
   let i = 0;
