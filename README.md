@@ -11,7 +11,7 @@ Gnawky is a local security scanner for Node.js projects. It combines proven open
 
 It can also stop risky packages before they reach your project: a [check before `npm install <pkg>` / `yarn add`](#checking-packages-before-you-install-them), pasted commands included, a [pre-commit check](#pre-commit-dependency-check) that blocks commits adding vulnerable dependencies, and a [pre-push warning](#pre-push-production-warning) about critical/high advisories that ship to production.
 
-**New to Gnawky?** The [presentation](https://webdevs.ro/gnawky/) walks through what it does, how to use it and why.
+**New to Gnawky?** [gnawky.dev](https://gnawky.dev) shows it in action, and the [presentation](https://gnawky.dev/presentation/) walks through what it does, how to use it and why.
 
 ## What it checks
 
@@ -302,12 +302,14 @@ gnawky fix next
 - `security-reviewer` agent: read-only triage of true vs. false positives, drafts minimal fix diffs
 - `security-audit` skill (`gnawky:security-audit`): Cloudflare's multi-phase audit skill, bundled unmodified under its MIT license. See `skills/security-audit/VENDORED.md` for the source commit and how to update it. Gnawky loads it with `--plugin-dir`, so the menu item works without installing the plugin.
 
-Install it locally through the included `marketplace.json`:
+Add it in Claude Code, straight from GitHub. The plugin brings its own copy of Gnawky; install the npm package too for the terminal app and the git hooks:
 
 ```
-/plugin marketplace add /path/to/gnawky
+/plugin marketplace add andreiciungan/gnawky
 /plugin install gnawky@gnawky-marketplace
 ```
+
+From a local clone, use its path instead: `/plugin marketplace add /path/to/gnawky`.
 
 Check the current Claude Code plugin docs if the commands differ in your version: https://docs.claude.com/en/docs/claude-code/overview
 

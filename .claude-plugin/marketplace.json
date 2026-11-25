@@ -1,6 +1,7 @@
 {
   "name": "gnawky-marketplace",
   "owner": { "name": "Andrei Ciungan" },
+  "description": "Gnawky: a local security scanner for Node.js projects, with guided, approval-based fixes. https://gnawky.dev",
   "plugins": [
     { "name": "gnawky", "source": "./", "description": "Security scan for Node.js projects with guided fixes." }
   ]
