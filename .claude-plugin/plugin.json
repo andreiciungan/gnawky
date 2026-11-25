@@ -1,6 +1,6 @@
 {
   "name": "gnawky",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Security scan for Node.js projects (dependencies, secrets, code patterns) with guided, approval-based fixes.",
   "license": "MIT"
 }
