@@ -31,7 +31,7 @@
   "files": [
     "bin/",
     "src/",
-    "assets/logo-mark.svg",
+    "assets/favicon.png",
     "assets/report-logo-dark.png",
     "assets/report-logo-light.png",
     ".claude-plugin/",

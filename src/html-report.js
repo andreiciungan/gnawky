@@ -13,8 +13,9 @@ import { groupFindings, isGroup, groupFixes, groupTitle, groupTriage, advisoryTi
 const asset = (name, enc) => {
   try { return fs.readFileSync(new URL(`../assets/${name}`, import.meta.url), enc); } catch { return null; }
 };
-const MARK = asset('logo-mark.svg', 'utf8');
-export const FAVICON = MARK ? `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(MARK)}">` : '';
+// The same tab icon as gnawky.dev: the mascot on a purple tile.
+const ICON = asset('favicon.png', 'base64');
+export const FAVICON = ICON ? `<link rel="icon" type="image/png" href="data:image/png;base64,${ICON}">` : '';
 const BANNER = { light: asset('report-logo-light.png', 'base64'), dark: asset('report-logo-dark.png', 'base64') };
 const ALT = 'Gnawky: gnaws through your code, watches like a hawk';
 export const BRAND = BANNER.light && BANNER.dark
