@@ -28,7 +28,7 @@ const triageLine = (projects) => {
     ? `Claude triage: ${n.real} real, ${n.falsePositive} likely false positive${n.falsePositive === 1 ? '' : 's'}, ${n.unsure} unsure, ${n.none} not triaged.`
     : null;
 };
-import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges } from './html-report.js';
+import { REPORT_CSS, esc, safeUrl, FAVICON, BRAND, triageBadges, SPARK } from './html-report.js';
 import { prodFirstCount, shipsToProd, priorityTier } from './prod.js';
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -71,6 +71,31 @@ export function renderWorkspaceMarkdown(result) {
   out.push(`**Fix for production first:** ${first} critical/high finding(s) ship to production across the projects (column "Prod first"). Findings that only devDependencies bring in are listed last.`, '');
   const tl = triageLine(result.projects);
   if (tl) out.push(`**${tl}** Likely false positives are listed last in each project. Verdicts are suggestions.`, '');
+  if (d.through.length) {
+    out.push('## Brought in by your own projects', '');
+    out.push('Advisories that reach a project through another picked project (from each project\'s lockfile):', '');
+    for (const t of d.through) out.push(`- **${t.rel}** brings ${plural(t.advisories, 'advisory', 'advisories')} into ${t.into.join(', ')}`);
+    out.push('');
+  }
+
+  out.push('## Findings per project', '');
+  for (const p of result.projects) {
+    out.push(`### ${p.rel} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
+    for (const n of p.notes ?? []) out.push(`- _Note: ${cell(n)}_`);
+    for (const t of p.tools) if (t.status !== 'ran') out.push(`- _${t.name} ${t.status}: ${cell(t.message)}_`);
+    for (const g of projectGroups(p)) {
+      const fixes = groupFixes(g);
+      const fix = fixes.length === 1 ? fixes[0].fix.detail : `${fixes.length} different fixes`;
+      const via = (g.lead.via ?? []).filter((v) => v !== g.package);
+      const tag = ['fix first, production', 'production', 'dev only'][Math.min(...g.findings.map(priorityTier))];
+      const t = groupVerdict(g, p);
+      const claude = t ? ` Claude: ${VERDICTS[t.verdict] ?? t.verdict}${t.verdict === 'false-positive' ? '' : `, ${URGENCIES[t.urgency] ?? t.urgency}`}${t.reason ? ` (${cell(t.reason)})` : ''}.` : '';
+      out.push(`- **[${g.severity.toUpperCase()}] ${cell(groupTitle(g))}**${isGroup(g) ? ` (${severityCounts(g.findings)})` : ''} _${tag}_${via.length ? `, via ${via.join(', ')}` : ''}. ${cell(fix)}.${claude}`);
+    }
+    if (!p.findings.length && p.tools.some((t) => t.status === 'ran')) out.push('No findings at or above the selected severity.');
+    out.push('');
+  }
+
   out.push('## Projects', '', '| Project | Package manager | Dependency audit | Prod first | Findings | Uses |', '|---|---|---|---|---|---|');
   for (const p of result.projects) {
     const a = d.audit(p);
@@ -123,31 +148,6 @@ export function renderWorkspaceMarkdown(result) {
       }
       out.push('');
     }
-  }
-
-  if (d.through.length) {
-    out.push('## Brought in by your own projects', '');
-    out.push('Advisories that reach a project through another picked project (from each project\'s lockfile):', '');
-    for (const t of d.through) out.push(`- **${t.rel}** brings ${plural(t.advisories, 'advisory', 'advisories')} into ${t.into.join(', ')}`);
-    out.push('');
-  }
-
-  out.push('## Findings per project', '');
-  for (const p of result.projects) {
-    out.push(`### ${p.rel} (${countBySeverity(p.findings) || 'no findings'}${prodFirstCount(p.findings) ? `; ${prodFirstCount(p.findings)} to fix for production first` : ''})`, '');
-    for (const n of p.notes ?? []) out.push(`- _Note: ${cell(n)}_`);
-    for (const t of p.tools) if (t.status !== 'ran') out.push(`- _${t.name} ${t.status}: ${cell(t.message)}_`);
-    for (const g of projectGroups(p)) {
-      const fixes = groupFixes(g);
-      const fix = fixes.length === 1 ? fixes[0].fix.detail : `${fixes.length} different fixes`;
-      const via = (g.lead.via ?? []).filter((v) => v !== g.package);
-      const tag = ['fix first, production', 'production', 'dev only'][Math.min(...g.findings.map(priorityTier))];
-      const t = groupVerdict(g, p);
-      const claude = t ? ` Claude: ${VERDICTS[t.verdict] ?? t.verdict}${t.verdict === 'false-positive' ? '' : `, ${URGENCIES[t.urgency] ?? t.urgency}`}${t.reason ? ` (${cell(t.reason)})` : ''}.` : '';
-      out.push(`- **[${g.severity.toUpperCase()}] ${cell(groupTitle(g))}**${isGroup(g) ? ` (${severityCounts(g.findings)})` : ''} _${tag}_${via.length ? `, via ${via.join(', ')}` : ''}. ${cell(fix)}${claude}`);
-    }
-    if (!p.findings.length && p.tools.some((t) => t.status === 'ran')) out.push('No findings at or above the selected severity.');
-    out.push('');
   }
   return out.join('\n');
 }
@@ -258,7 +258,7 @@ ${d.order.length > 1 ? `<p><b>Fix order:</b> shared projects first, release them
       const tier = Math.min(...g.findings.map(priorityTier));
       const badge = tier === 0 ? ' <span class="tri prod-first">prod first</span>' : tier === 2 ? ' <span class="tri">dev only</span>' : '';
       const t = groupVerdict(g, p);
-      const why = t?.reason ? `<div class="fixline">Claude: ${esc(t.reason)}</div>` : '';
+      const why = t?.reason ? `<div class="take take-sm take-${esc(t.verdict)}"><div class="take-h">${SPARK}<b>Claude</b></div><p>${esc(t.reason)}</p></div>` : '';
       return `<li class="sev-${esc(g.severity)}${t?.verdict === 'false-positive' ? ' fp' : ''}" data-tier="${tier}">${sevBadge(g.severity)}${badge}${t ? triageBadges(t) : ''} <b>${esc(groupTitle(g))}</b>${isGroup(g) ? ` <span class="muted">(${esc(severityCounts(g.findings))})</span>` : ''}${ids ? ` <span class="muted">${esc(ids)}</span>` : ''}${via.length ? ` <span class="muted">via ${esc(via.join(', '))}</span>` : ''}<div class="fixline">${fixes.map((x) => esc(x.fix.detail)).join('<br>')}</div>${why}</li>`;
     }).join('');
     const none = !p.findings.length && p.tools.some((t) => t.status === 'ran') ? '<li class="muted">No findings at or above the selected severity.</li>' : '';
@@ -299,6 +299,10 @@ ol.order{margin:0;padding-left:22px}ol.order li{margin-bottom:4px}
 .fixline{color:var(--muted);font-size:13px;margin-top:2px}
 .sev-none{--c:var(--ok)}.pf{color:var(--critical)}
 .proj li.fp{opacity:.7}
+.claude+.controls{margin-top:14px}
+.proj li>.sev,.proj li>.tri{margin-right:4px}
+.take-sm{margin:8px 0 2px;padding:8px 12px 10px}.take-sm p{font-size:14.5px;margin-top:4px}
+.proj{box-shadow:var(--shadow);border-radius:12px}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -311,9 +315,13 @@ ${BRAND}
 <div class="tiles">${tiles}</div>
 <div class="claude"><div class="tile prod-tile" style="cursor:default"><span class="n">${prodFirstTotal}</span><span class="l">Fix for production first</span></div>
 <p>Critical and high findings that ship to production. ${devTotal ? `${devTotal} ${devTotal === 1 ? "comes" : "come"} only from devDependencies (build, test and lint tools) and are listed last in each project.` : ''} Worked out from package.json; in Next.js projects, devDependencies that aren't test or lint tools count as production, since they can be bundled.</p></div>
-${triageLine(result.projects) ? `<p><b>${esc(triageLine(result.projects))}</b> <span class="muted">Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code.</span></p>` : ''}
+${triageLine(result.projects) ? `<div class="claude claude-ai"><div><div class="take-h">${SPARK}<b>${esc(triageLine(result.projects))}</b></div><p>Likely false positives are listed last in each project. Verdicts are suggestions from Claude, made with each project's code: check the reason before you rely on one.</p></div></div>` : ''}
 
 ${allFindings.some((f) => f.scope) ? `<div class="controls"><select id="scope" aria-label="Filter by production"><option value="">All (${allFindings.length})</option><option value="prod"${allFindings.length - devTotal ? '' : ' disabled'}>Production only (${allFindings.length - devTotal})</option><option value="dev"${devTotal ? '' : ' disabled'}>Dev only (${devTotal})</option></select></div>` : ''}
+
+${throughList ? `<h2>Brought in by your own projects</h2><p class="muted">Advisories that reach a project through another picked project, from each project's lockfile.</p><ul>${throughList}</ul>` : ''}
+<h2>Findings per project <span class="muted">(${d.total})</span></h2>
+${perProject}
 
 <h2>How they are linked</h2>
 ${linksSection}
@@ -323,10 +331,6 @@ ${linksSection}
 
 <h2>Packages in more than one project <span class="muted">(${d.shared.length})</span></h2>
 ${d.shared.length ? `<p class="muted">${d.shared.reduce((n, e) => n + e.advisories.length, 0)} advisories in ${d.shared.length} packages, grouped per package like in each project. The fix can differ per project: it depends on what installs the package there.</p>${sharedCards}` : '<div class="empty-state">Every vulnerable package was found in one project only.</div>'}
-${throughList ? `<h2>Brought in by your own projects</h2><p class="muted">Advisories that reach a project through another picked project, from each project's lockfile.</p><ul>${throughList}</ul>` : ''}
-
-<h2>Findings per project <span class="muted">(${d.total})</span></h2>
-${perProject}
 
 <script>
 (function(){
